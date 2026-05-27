@@ -5,6 +5,7 @@ const sections = [
     { id: 'estadisticas', label: 'Estadisticas', icon: 'chart' },
     { id: 'gantt', label: 'Gantt', icon: 'chart' },
     { id: 'informe', label: 'Informe', icon: 'file' },
+    { id: 'busqueda', label: 'Busqueda', icon: 'search' },
     { id: 'importar', label: 'Importar', icon: 'file' },
     { id: 'equipo', label: 'Equipo', icon: 'team' },
     { id: 'admin', label: 'Admin', icon: 'team' },
@@ -106,6 +107,9 @@ let importPreview = [];
 let importRaw = '';
 let importWarnings = [];
 let selectedImportIndexes = new Set();
+let searchCache = [];
+let searchResultsQuery = '';
+let activeSearchTab = 'tenders';
 let calendarCursor = startOfMonth(today());
 let tenderSort = { column: 'deadline', direction: 'asc' };
 let tenderColumnFilters = {};
@@ -571,7 +575,131 @@ function filtered(items) {
         return items;
     }
 
-    return items.filter((item) => Object.values(item).join(' ').toLowerCase().includes(query));
+    return items.filter((item) => normalizeSearchText(Object.values(item).join(' ')).includes(searchTerm()));
+}
+
+function normalizeSearchText(value) {
+    return String(value ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+}
+
+function searchTerm() {
+    return normalizeSearchText(query).trim();
+}
+
+function buildSearchCache() {
+    return [
+        ...visibleItems('tenders').map((item) => searchRecord('tenders', item, item.title, [
+            item.code,
+            item.client,
+            item.lot,
+            item.owner,
+            item.status,
+            formatDate(item.deadline),
+        ])),
+        ...visibleItems('events').map((item) => searchRecord('events', item, item.title, [
+            item.tender,
+            item.type,
+            item.owner,
+            item.status,
+            formatDate(item.date),
+        ])),
+        ...visibleItems('team').map((item) => searchRecord('team', item, item.name, [
+            item.username,
+            item.email,
+            item.role,
+            item.status,
+        ])),
+    ];
+}
+
+function searchRecord(entity, item, title, parts) {
+    const subtitle = parts.filter(Boolean).join(' · ');
+
+    return {
+        entity,
+        id: item.id,
+        item,
+        title: title ?? '',
+        subtitle,
+        text: normalizeSearchText([title, subtitle, ...Object.values(item)].join(' ')),
+    };
+}
+
+function globalSearchResults(term = searchTerm()) {
+    if (!term) {
+        return { tenders: [], events: [], team: [] };
+    }
+
+    const results = { tenders: [], events: [], team: [] };
+
+    searchCache
+        .filter((record) => record.text.includes(term))
+        .forEach((record) => results[record.entity].push(record));
+
+    return results;
+}
+
+function renderSearchSuggestions() {
+    const suggestions = document.querySelector('[data-search-suggestions]');
+
+    if (!suggestions) {
+        return;
+    }
+
+    const term = searchTerm();
+
+    if (!term || currentSection === 'busqueda') {
+        suggestions.classList.add('hidden');
+        suggestions.innerHTML = '';
+        return;
+    }
+
+    const results = Object.values(globalSearchResults(term)).flat().slice(0, 6);
+
+    if (!results.length) {
+        suggestions.classList.remove('hidden');
+        suggestions.innerHTML = '<p class="p-4 text-sm font-semibold text-[#7082a4]">Sin coincidencias.</p>';
+        return;
+    }
+
+    suggestions.classList.remove('hidden');
+    suggestions.innerHTML = `
+        <div class="divide-y divide-[#e7edf6]">
+            ${results.map((record) => `
+                <button class="flex w-full items-start justify-between gap-4 p-4 text-left hover:bg-[#f8fafd]" type="button" data-action="search-open" data-entity="${record.entity}" data-id="${record.id}">
+                    <span class="min-w-0">
+                        <span class="block truncate text-sm font-bold text-[#21345d]">${escapeHtml(record.title)}</span>
+                        <span class="mt-1 block truncate text-xs font-semibold text-[#7082a4]">${escapeHtml(record.subtitle)}</span>
+                    </span>
+                    <span class="status-pill status-slate shrink-0">${searchEntityLabel(record.entity)}</span>
+                </button>
+            `).join('')}
+        </div>
+        <button class="flex w-full items-center justify-between gap-3 bg-[#f8fafd] p-4 text-sm font-bold text-blue-700" type="button" data-action="search-submit">
+            <span>Ver resultados de busqueda</span>
+            <span>${results.length} sugerencias</span>
+        </button>
+    `;
+}
+
+function searchEntityLabel(entity) {
+    return {
+        tenders: 'Licitacion',
+        events: 'Hito',
+        team: 'Persona',
+    }[entity] ?? '';
+}
+
+function submitGlobalSearch(displayQuery = query) {
+    searchResultsQuery = displayQuery.trim();
+
+    if (!searchResultsQuery) {
+        return;
+    }
+
+    const results = globalSearchResults(normalizeSearchText(searchResultsQuery));
+    activeSearchTab = ['tenders', 'events', 'team'].find((tab) => results[tab].length) ?? 'tenders';
+    setSection('busqueda');
 }
 
 function setSection(section) {
@@ -605,6 +733,7 @@ function render() {
     }
 
     applySettings();
+    searchCache = buildSearchCache();
     renderChrome();
     if (!isAdmin() && ['admin', 'equipo', 'importar'].includes(currentSection)) {
         currentSection = 'inicio';
@@ -618,6 +747,7 @@ function render() {
         estadisticas: renderStats,
         gantt: renderGantt,
         informe: renderExecutiveReport,
+        busqueda: renderSearchResults,
         importar: renderImportTenders,
         equipo: () => renderCollection('team'),
         admin: renderAdmin,
@@ -635,6 +765,7 @@ function render() {
         ${renderers[currentSection]()}
     `;
     restoreTenderFilterFocus();
+    renderSearchSuggestions();
 }
 
 function impersonationBanner() {
@@ -1104,6 +1235,68 @@ function eventList() {
                 </article>
             `).join('') || `<p class="text-sm text-[#7082a4]">No hay hitos.</p>`}
         </div>
+    `;
+}
+
+function renderSearchResults() {
+    const term = normalizeSearchText(searchResultsQuery || query).trim();
+    const results = globalSearchResults(term);
+    const counts = {
+        tenders: results.tenders.length,
+        events: results.events.length,
+        team: results.team.length,
+    };
+
+    if (!['tenders', 'events', 'team'].includes(activeSearchTab)) {
+        activeSearchTab = 'tenders';
+    }
+
+    return `
+        <section class="panel">
+            <div class="flex flex-wrap items-start justify-between gap-4">
+                <div>
+                    <h2 class="text-lg font-bold">Resultados de busqueda</h2>
+                    <p class="mt-1 text-sm font-semibold text-[#7082a4]">${searchResultsQuery ? `Coincidencias para "${escapeHtml(searchResultsQuery)}"` : 'Escribe una busqueda en la barra superior.'}</p>
+                </div>
+                <span class="status-pill status-blue">${counts.tenders + counts.events + counts.team} resultados</span>
+            </div>
+            <div class="mt-6 flex flex-wrap gap-2 border-b border-[#e7edf6]">
+                ${searchTabButton('tenders', 'Licitaciones', counts.tenders)}
+                ${searchTabButton('events', 'Hitos', counts.events)}
+                ${searchTabButton('team', 'Personas', counts.team)}
+            </div>
+            <div class="mt-5 grid gap-3">
+                ${results[activeSearchTab].map(searchResultCard).join('') || '<p class="rounded-lg bg-slate-50 p-4 text-sm font-semibold text-[#53658b]">No hay coincidencias en esta categoria.</p>'}
+            </div>
+        </section>
+    `;
+}
+
+function searchTabButton(tab, label, count) {
+    const active = activeSearchTab === tab;
+
+    return `
+        <button class="flex items-center gap-2 border-b-2 px-4 pb-3 text-sm font-bold ${active ? 'border-blue-700 text-blue-700' : 'border-transparent text-[#53658b] hover:text-[#21345d]'}" type="button" data-action="search-tab" data-tab="${tab}">
+            <span>${label}</span>
+            <span class="rounded-full ${active ? 'bg-blue-100 text-blue-700' : 'bg-slate-100 text-[#53658b]'} px-2 py-0.5 text-xs">${count}</span>
+        </button>
+    `;
+}
+
+function searchResultCard(record) {
+    return `
+        <article class="rounded-lg border border-[#e7edf6] p-4">
+            <div class="flex flex-wrap items-start justify-between gap-4">
+                <div class="min-w-0">
+                    <div class="flex flex-wrap items-center gap-2">
+                        <h3 class="font-bold text-[#21345d]">${escapeHtml(record.title)}</h3>
+                        <span class="status-pill status-slate">${searchEntityLabel(record.entity)}</span>
+                    </div>
+                    <p class="mt-2 text-sm font-semibold text-[#7082a4]">${escapeHtml(record.subtitle)}</p>
+                </div>
+                <button class="link-action mr-0" type="button" data-action="search-open" data-entity="${record.entity}" data-id="${record.id}">Ver</button>
+            </div>
+        </article>
     `;
 }
 
@@ -2665,6 +2858,14 @@ document.addEventListener('click', (event) => {
     } else if (action === 'import-select-none') {
         selectedImportIndexes = new Set();
         render();
+    } else if (action === 'search-submit') {
+        submitGlobalSearch(document.querySelector('[data-search]')?.value ?? query);
+    } else if (action === 'search-tab') {
+        activeSearchTab = trigger.dataset.tab;
+        render();
+    } else if (action === 'search-open') {
+        document.querySelector('[data-search-suggestions]')?.classList.add('hidden');
+        openView(entity, id);
     } else if (action === 'import-clear') {
         clearImportPreview();
         render();
@@ -2769,8 +2970,43 @@ document.addEventListener('input', (event) => {
     }
 
     if (event.target.matches('[data-search]')) {
-        query = event.target.value.trim().toLowerCase();
-        render();
+        query = event.target.value.trim();
+        searchCache = buildSearchCache();
+
+        if (currentSection === 'busqueda') {
+            searchResultsQuery = event.target.value.trim();
+            render();
+        } else {
+            render();
+        }
+    }
+});
+
+document.addEventListener('keydown', (event) => {
+    if (!event.target.matches('[data-search]')) {
+        return;
+    }
+
+    if (event.key === 'Enter') {
+        event.preventDefault();
+        query = event.target.value.trim();
+        submitGlobalSearch(event.target.value);
+    }
+
+    if (event.key === 'Escape') {
+        document.querySelector('[data-search-suggestions]')?.classList.add('hidden');
+    }
+});
+
+document.addEventListener('focusin', (event) => {
+    if (event.target.matches('[data-search]')) {
+        renderSearchSuggestions();
+    }
+});
+
+document.addEventListener('click', (event) => {
+    if (!event.target.closest('[data-search], [data-search-suggestions]')) {
+        document.querySelector('[data-search-suggestions]')?.classList.add('hidden');
     }
 });
 

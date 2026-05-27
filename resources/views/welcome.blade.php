@@ -49,10 +49,13 @@
                     <div class="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
                         <div class="flex flex-1 flex-col gap-3 md:flex-row">
                             <select class="h-12 rounded-lg border border-[#d7e0ee] bg-white px-4 text-sm font-bold text-[#21345d] lg:hidden" data-mobile-nav aria-label="Cambiar seccion"></select>
-                            <label class="flex h-12 max-w-3xl flex-1 items-center rounded-lg border border-[#d7e0ee] bg-white px-5 shadow-sm">
-                                <svg class="size-5 text-[#7082a4]"><use href="#icon-search"/></svg>
-                                <input class="ml-4 min-w-0 flex-1 text-sm font-medium text-[#07183f] outline-none placeholder:text-[#7082a4]" data-search placeholder="Buscar licitaciones, hitos, personas..." />
-                            </label>
+                            <div class="relative max-w-3xl flex-1">
+                                <label class="flex h-12 items-center rounded-lg border border-[#d7e0ee] bg-white px-5 shadow-sm">
+                                    <svg class="size-5 text-[#7082a4]"><use href="#icon-search"/></svg>
+                                    <input class="ml-4 min-w-0 flex-1 text-sm font-medium text-[#07183f] outline-none placeholder:text-[#7082a4]" data-search placeholder="Buscar licitaciones, hitos, personas..." autocomplete="off" />
+                                </label>
+                                <div class="absolute left-0 right-0 top-14 z-30 hidden overflow-hidden rounded-lg border border-[#dfe6f2] bg-white shadow-xl" data-search-suggestions></div>
+                            </div>
                         </div>
 
                         <div class="flex items-center justify-between gap-5">
