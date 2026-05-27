@@ -1,0 +1,256 @@
+@import 'tailwindcss';
+
+@source '../../vendor/laravel/framework/src/Illuminate/Pagination/resources/views/*.blade.php';
+@source '../../storage/framework/views/*.php';
+@source '../**/*.blade.php';
+@source '../**/*.js';
+
+@theme {
+    --font-sans: 'Instrument Sans', ui-sans-serif, system-ui, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji',
+        'Segoe UI Symbol', 'Noto Color Emoji';
+}
+
+@layer components {
+    .panel {
+        @apply rounded-lg border border-[#dfe6f2] bg-white p-5 shadow-sm;
+    }
+
+    .nav-link {
+        @apply flex h-15 items-center gap-4 rounded-lg px-5 text-[15px] font-semibold text-white/88 hover:bg-white/8;
+    }
+
+    .nav-link-active {
+        background-color: color-mix(in srgb, var(--brand-color, #1d4ed8) 72%, transparent);
+        @apply text-white shadow-lg shadow-blue-950/20;
+    }
+
+    .btn-primary {
+        background-color: var(--brand-color, #1d4ed8);
+        @apply inline-flex h-10 items-center justify-center rounded-lg px-4 text-sm font-bold text-white shadow-lg shadow-blue-700/15;
+    }
+
+    .btn-primary:hover {
+        filter: brightness(0.92);
+    }
+
+    .btn-secondary {
+        @apply inline-flex h-10 items-center justify-center rounded-lg border border-[#dfe6f2] bg-white px-4 text-sm font-bold text-[#21345d] hover:bg-[#f2f5fb];
+    }
+
+    .link-action {
+        @apply mr-3 text-sm font-bold text-blue-700 hover:text-blue-900;
+    }
+
+    .link-danger {
+        @apply text-sm font-bold text-rose-600 hover:text-rose-800;
+    }
+
+    .data-table {
+        @apply w-full min-w-[980px] text-left text-sm;
+    }
+
+    .data-table th {
+        @apply pb-4 text-xs font-bold text-[#53658b];
+    }
+
+    .data-table td {
+        @apply border-t border-[#e7edf6] py-3 pr-4 align-middle font-medium text-[#354971];
+    }
+
+    .dashboard-metrics-frame {
+        @apply w-full;
+    }
+
+    .dashboard-metrics-row {
+        @apply grid w-full grid-cols-1 gap-5 md:grid-cols-2 2xl:grid-cols-4;
+    }
+
+    .gantt-grid {
+        grid-template-columns: 220px 150px 170px repeat(28, 52px);
+        @apply grid min-w-max;
+    }
+
+    .gantt-header {
+        @apply sticky top-0 z-20;
+    }
+
+    .gantt-head-cell {
+        @apply grid min-h-13 place-items-center border-b border-r border-[#b9c6d8] bg-[#174b77] px-2 text-xs font-black text-white;
+    }
+
+    .gantt-head-cell small {
+        @apply text-[10px] font-bold text-blue-100;
+    }
+
+    .gantt-cell {
+        @apply min-h-11 border-b border-r border-[#d6deea] bg-white px-2 py-2 text-xs font-semibold text-[#12244f];
+    }
+
+    .gantt-day {
+        @apply grid min-h-11 place-items-center border-b border-r border-[#d6deea] bg-white text-[10px] font-black text-[#12244f];
+    }
+
+    .gantt-day small {
+        @apply text-[9px] leading-none;
+    }
+
+    .gantt-bar {
+        @apply bg-blue-200;
+    }
+
+    .gantt-bar-danger {
+        @apply bg-rose-100;
+    }
+
+    .gantt-deadline {
+        @apply bg-red-600 text-white;
+    }
+
+    .gantt-summary-title {
+        @apply bg-[#174b77] px-3 py-2 text-sm font-black uppercase text-white;
+    }
+
+    .gantt-load-row .gantt-cell {
+        @apply bg-[#f7f9fd];
+    }
+
+    .gantt-load-cell {
+        @apply grid min-h-10 place-items-center border-b border-r border-[#d6deea] bg-white text-xs font-black;
+    }
+
+    .gantt-load-ok {
+        @apply bg-blue-100;
+    }
+
+    .gantt-load-high {
+        @apply bg-amber-200 text-amber-950;
+    }
+
+    .gantt-load-over {
+        @apply bg-rose-200 text-rose-900;
+    }
+
+    .gantt-sticky {
+        @apply sticky left-0 z-10;
+    }
+
+    .gantt-sticky-2 {
+        @apply sticky left-[220px] z-10;
+    }
+
+    .gantt-sticky-3 {
+        @apply sticky left-[370px] z-10;
+    }
+
+    .field-label {
+        @apply grid gap-2 text-sm font-bold text-[#21345d];
+    }
+
+    .field-control {
+        @apply w-full rounded-lg border border-[#d7e0ee] bg-white px-4 py-3 text-sm font-semibold text-[#07183f] outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100;
+    }
+
+    .metric-icon-blue {
+        @apply bg-blue-100 text-blue-700;
+    }
+
+    .metric-icon-teal {
+        @apply bg-teal-100 text-teal-700;
+    }
+
+    .metric-icon-green {
+        @apply bg-green-100 text-green-700;
+    }
+
+    .metric-icon-violet {
+        @apply bg-violet-100 text-violet-700;
+    }
+
+    .event-pill {
+        @apply absolute bottom-2 left-1 right-1 truncate rounded border px-2 py-1 text-[11px] font-bold;
+    }
+
+    .event-blue {
+        @apply border-blue-300 bg-blue-50 text-blue-700;
+    }
+
+    .event-green {
+        @apply border-emerald-300 bg-emerald-50 text-emerald-700;
+    }
+
+    .event-violet {
+        @apply border-violet-300 bg-violet-50 text-violet-700;
+    }
+
+    .event-rose {
+        @apply border-rose-300 bg-rose-50 text-rose-700;
+    }
+
+    .event-amber {
+        @apply border-amber-300 bg-amber-50 text-amber-700;
+    }
+
+    .dot-teal {
+        @apply bg-teal-500;
+    }
+
+    .dot-blue {
+        @apply bg-blue-500;
+    }
+
+    .dot-fuchsia {
+        @apply bg-fuchsia-500;
+    }
+
+    .dot-rose {
+        @apply bg-rose-500;
+    }
+
+    .brand-badge {
+        @apply grid size-9 shrink-0 place-items-center rounded-md text-[10px] font-black uppercase;
+    }
+
+    .brand-navy {
+        @apply bg-[#153d72] text-white;
+    }
+
+    .brand-orange {
+        @apply bg-orange-500 text-white;
+    }
+
+    .brand-mint {
+        @apply border border-emerald-200 bg-emerald-50 text-emerald-600;
+    }
+
+    .brand-steel {
+        @apply bg-slate-100 text-slate-700;
+    }
+
+    .brand-sky {
+        @apply bg-sky-50 text-sky-700;
+    }
+
+    .status-pill {
+        @apply inline-flex h-7 min-w-22 items-center justify-center rounded-md px-3 text-xs font-bold;
+    }
+
+    .status-blue {
+        @apply bg-blue-50 text-blue-700;
+    }
+
+    .status-amber {
+        @apply bg-amber-50 text-amber-700;
+    }
+
+    .status-slate {
+        @apply bg-slate-100 text-slate-600;
+    }
+
+    .status-rose {
+        @apply bg-rose-50 text-rose-600;
+    }
+
+    .status-green {
+        @apply bg-emerald-50 text-emerald-700;
+    }
+}
