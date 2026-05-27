@@ -105,6 +105,7 @@ let auth = loadAuth();
 let importPreview = [];
 let importRaw = '';
 let importWarnings = [];
+let selectedImportIndexes = new Set();
 let calendarCursor = startOfMonth(today());
 let tenderSort = { column: 'deadline', direction: 'asc' };
 let tenderColumnFilters = {};
@@ -1368,6 +1369,11 @@ function renderImportTenders() {
         return '<section class="panel"><p class="text-sm font-semibold text-[#7082a4]">No tienes permisos para importar licitaciones.</p></section>';
     }
 
+    const selectedCount = selectedImportCount();
+    const importButtonLabel = selectedCount === importPreview.length
+        ? `Importar todo (${selectedCount})`
+        : `Importar seleccion (${selectedCount})`;
+
     return `
         <section class="grid gap-6 xl:grid-cols-[.9fr_1.1fr]">
             <article class="panel">
@@ -1383,10 +1389,16 @@ function renderImportTenders() {
                 <div class="flex flex-wrap items-center justify-between gap-3">
                     <div>
                         <h2 class="text-lg font-bold">Preview de importacion</h2>
-                        <p class="mt-1 text-sm font-semibold text-[#7082a4]">${importPreview.length} licitaciones preparadas${importWarnings.length ? ` · ${importWarnings.length} avisos` : ''}</p>
+                        <p class="mt-1 text-sm font-semibold text-[#7082a4]">${importPreview.length} licitaciones preparadas${importPreview.length ? ` · ${selectedCount} seleccionadas` : ''}${importWarnings.length ? ` · ${importWarnings.length} avisos` : ''}</p>
                     </div>
-                    ${importPreview.length ? '<button class="btn-primary" type="button" data-action="import-commit">Importar / actualizar licitaciones</button>' : ''}
+                    ${importPreview.length ? `<button class="btn-primary disabled:cursor-not-allowed disabled:opacity-50" type="button" data-action="import-commit" ${selectedCount ? '' : 'disabled'}>${importButtonLabel}</button>` : ''}
                 </div>
+                ${importPreview.length ? `
+                    <div class="mt-5 flex flex-wrap items-center gap-3">
+                        <button class="btn-secondary" type="button" data-action="import-select-all">Seleccionar todos</button>
+                        <button class="btn-secondary" type="button" data-action="import-select-none">Quitar seleccion</button>
+                    </div>
+                ` : ''}
                 ${importWarnings.length ? `
                     <div class="mt-5 space-y-2 rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm font-semibold text-amber-800">
                         ${importWarnings.map((warning) => `<p>${escapeHtml(warning)}</p>`).join('')}
@@ -1401,9 +1413,14 @@ function renderImportTenders() {
 }
 
 function importPreviewTable() {
+    const allSelected = importPreview.length > 0 && selectedImportCount() === importPreview.length;
+
     return `
         <table class="data-table">
             <thead><tr>
+                <th class="w-12">
+                    <input class="size-4 rounded border-[#b9c6d8]" type="checkbox" data-import-selection-all aria-label="Seleccionar todas las licitaciones" ${allSelected ? 'checked' : ''}>
+                </th>
                 <th>Expediente</th>
                 <th>Objeto</th>
                 <th>Lote</th>
@@ -1415,8 +1432,11 @@ function importPreviewTable() {
                 <th>Estado</th>
             </tr></thead>
             <tbody>
-                ${importPreview.map((item) => `
+                ${importPreview.map((item, index) => `
                     <tr>
+                        <td>
+                            <input class="size-4 rounded border-[#b9c6d8]" type="checkbox" data-import-selection="${index}" aria-label="Seleccionar ${escapeHtml(item.code || item.title)}" ${selectedImportIndexes.has(String(index)) ? 'checked' : ''}>
+                        </td>
                         <td>${escapeHtml(item.code)}</td>
                         <td>${escapeHtml(item.title)}</td>
                         <td>${escapeHtml(item.lot)}</td>
@@ -1433,6 +1453,21 @@ function importPreviewTable() {
     `;
 }
 
+function selectedImportCount() {
+    return importPreview.filter((_, index) => selectedImportIndexes.has(String(index))).length;
+}
+
+function selectAllImportPreview() {
+    selectedImportIndexes = new Set(importPreview.map((_, index) => String(index)));
+}
+
+function clearImportPreview() {
+    importPreview = [];
+    importRaw = '';
+    importWarnings = [];
+    selectedImportIndexes = new Set();
+}
+
 function previewImportTenders() {
     const input = document.querySelector('[data-import-input]');
 
@@ -1441,12 +1476,14 @@ function previewImportTenders() {
     if (!importRaw.trim()) {
         importPreview = [];
         importWarnings = [];
+        selectedImportIndexes = new Set();
         render();
         return;
     }
 
     try {
         importPreview = parseImportedTenders(importRaw);
+        selectAllImportPreview();
         render();
     } catch (error) {
         alert(error.message);
@@ -1458,8 +1495,15 @@ function commitImportTenders() {
         return;
     }
 
+    const selectedTenders = importPreview.filter((_, index) => selectedImportIndexes.has(String(index)));
+
+    if (!selectedTenders.length) {
+        alert('Selecciona al menos una licitacion para importar.');
+        return;
+    }
+
     const importedAt = Date.now();
-    importPreview.forEach((tender, index) => {
+    selectedTenders.forEach((tender, index) => {
         const { importAction, importUpdateId, newUser, ...tenderData } = tender;
 
         if (importAction === 'updateEconomicOffer' && importUpdateId) {
@@ -1474,9 +1518,7 @@ function commitImportTenders() {
         syncTenderPresentationEvent(record);
     });
 
-    importPreview = [];
-    importRaw = '';
-    importWarnings = [];
+    clearImportPreview();
     saveState();
     setSection('licitaciones');
 }
@@ -2617,10 +2659,14 @@ document.addEventListener('click', (event) => {
         previewImportTenders();
     } else if (action === 'import-commit') {
         commitImportTenders();
+    } else if (action === 'import-select-all') {
+        selectAllImportPreview();
+        render();
+    } else if (action === 'import-select-none') {
+        selectedImportIndexes = new Set();
+        render();
     } else if (action === 'import-clear') {
-        importPreview = [];
-        importRaw = '';
-        importWarnings = [];
+        clearImportPreview();
         render();
     }
 });
@@ -2684,6 +2730,25 @@ document.addEventListener('change', (event) => {
 
     if (event.target.matches('[data-mobile-nav]')) {
         setSection(event.target.value);
+    }
+
+    if (event.target.matches('[data-import-selection-all]')) {
+        selectedImportIndexes = event.target.checked
+            ? new Set(importPreview.map((_, index) => String(index)))
+            : new Set();
+        render();
+    }
+
+    if (event.target.matches('[data-import-selection]')) {
+        const index = event.target.dataset.importSelection;
+
+        if (event.target.checked) {
+            selectedImportIndexes.add(index);
+        } else {
+            selectedImportIndexes.delete(index);
+        }
+
+        render();
     }
 });
 
