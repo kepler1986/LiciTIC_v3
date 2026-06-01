@@ -13,11 +13,11 @@ const sections = [
 
 const defaults = {
     tenders: [
-        { id: 'lic-1', title: 'Servicios Cloud Hibrida', client: 'BBVA', code: 'BBVA-2025-18', lot: '1', deadline: '2025-06-06T14:00', status: 'En preparacion', budget: '850000.00', economicOffer: '', owner: 'Laura Gomez', description: 'Migracion y servicios gestionados de cloud hibrida.' },
-        { id: 'lic-2', title: 'Infraestructura CPD', client: 'Orange', code: 'Orange-2025-27', lot: 'Unico', deadline: '2025-05-16T12:00', status: 'En evaluacion', budget: '620000.00', economicOffer: '', owner: 'Javier Ruiz', description: 'Diseno de arquitectura y renovacion de CPD.' },
-        { id: 'lic-3', title: 'Puesto de Trabajo Seguro', client: 'ADIF', code: 'ADIF-2025-09', lot: '2', deadline: '2025-05-28T13:30', status: 'En analisis', budget: '410000.00', economicOffer: '', owner: 'Marta Sanchez', description: 'Modernizacion de endpoint, identidad y soporte.' },
-        { id: 'lic-4', title: 'Plataforma de Datos', client: 'Ayuntamiento de Madrid', code: 'MAD-2025-33', lot: 'Unico', deadline: '2025-06-12T15:00', status: 'En analisis', budget: '720000.00', economicOffer: '', owner: 'Carlos Martin', description: 'Gobierno del dato, ingesta y cuadros de mando.' },
-        { id: 'lic-5', title: 'Servicios de Ciberseguridad', client: 'DGT', code: 'DGT-2025-21', lot: '3', deadline: '2025-06-20T14:00', status: 'En preparacion', budget: '980000.00', economicOffer: '', owner: 'Elena Torres', description: 'SOC, respuesta a incidentes y hardening.' },
+        { id: 'lic-1', title: 'Servicios Cloud Hibrida', client: 'BBVA', code: 'BBVA-2025-18', lot: '1', deadline: '2025-06-06T14:00', status: 'En preparacion', budget: '850000.00', economicOffer: '', economicOfferWaived: false, owner: 'Laura Gomez', description: 'Migracion y servicios gestionados de cloud hibrida.' },
+        { id: 'lic-2', title: 'Infraestructura CPD', client: 'Orange', code: 'Orange-2025-27', lot: 'Unico', deadline: '2025-05-16T12:00', status: 'En evaluacion', budget: '620000.00', economicOffer: '', economicOfferWaived: false, owner: 'Javier Ruiz', description: 'Diseno de arquitectura y renovacion de CPD.' },
+        { id: 'lic-3', title: 'Puesto de Trabajo Seguro', client: 'ADIF', code: 'ADIF-2025-09', lot: '2', deadline: '2025-05-28T13:30', status: 'En analisis', budget: '410000.00', economicOffer: '', economicOfferWaived: false, owner: 'Marta Sanchez', description: 'Modernizacion de endpoint, identidad y soporte.' },
+        { id: 'lic-4', title: 'Plataforma de Datos', client: 'Ayuntamiento de Madrid', code: 'MAD-2025-33', lot: 'Unico', deadline: '2025-06-12T15:00', status: 'En analisis', budget: '720000.00', economicOffer: '', economicOfferWaived: false, owner: 'Carlos Martin', description: 'Gobierno del dato, ingesta y cuadros de mando.' },
+        { id: 'lic-5', title: 'Servicios de Ciberseguridad', client: 'DGT', code: 'DGT-2025-21', lot: '3', deadline: '2025-06-20T14:00', status: 'En preparacion', budget: '980000.00', economicOffer: '', economicOfferWaived: false, owner: 'Elena Torres', description: 'SOC, respuesta a incidentes y hardening.' },
     ],
     events: [
         { id: 'evt-1', title: 'RFP BBVA', tender: 'Servicios Cloud Hibrida', date: '2025-05-06', type: 'RFP', owner: 'Laura Gomez', status: 'Pendiente' },
@@ -57,7 +57,7 @@ const schemas = {
     tenders: [
         ['code', 'Expediente'], ['title', 'Objeto'], ['lot', 'Lote'], ['client', 'Organismo'], ['deadline', 'Fecha y hora fin aceptacion ofertas', 'datetime-local'],
         ['status', 'Estado', 'select', ['En analisis', 'En preparacion', 'En evaluacion', 'Descartada', 'Desistida', 'Perdida', 'Ganada']],
-        ['budget', 'PBL', 'currency'], ['economicOffer', 'Oferta economica', 'currency'], ['owner', 'Responsable'], ['adjudicationDate', 'Fecha adjudicacion recibida', 'optionalDate'], ['description', 'Descripcion', 'textarea'],
+        ['budget', 'PBL', 'currency'], ['economicOffer', 'Oferta economica', 'currency'], ['economicOfferWaived', 'Anular oferta economica', 'checkbox'], ['owner', 'Responsable'], ['adjudicationDate', 'Fecha adjudicacion recibida', 'optionalDate'], ['description', 'Descripcion', 'textarea'],
     ],
     events: [
         ['title', 'Titulo'], ['tender', 'Licitacion', 'tenderSelect'], ['type', 'Tipo'], ['preparationOther', 'Preparacion-Otros', 'checkbox'],
@@ -203,6 +203,7 @@ function normalizeState(nextState) {
         deadline: tender.deadline?.includes('T') ? tender.deadline : `${tender.deadline}T14:00`,
         status: statusMap[tender.status] ?? tender.status,
         economicOffer: tender.economicOffer ?? '',
+        economicOfferWaived: Boolean(tender.economicOfferWaived),
         presentedAt: tender.presentedAt || ((statusMap[tender.status] ?? tender.status) === 'En evaluacion' ? (tender.deadline || '') : ''),
     }));
 
@@ -348,6 +349,54 @@ function isUpcomingTenderDue(tender) {
     return deadline >= start && deadline <= end;
 }
 
+function isTenderActive(tender) {
+    return !['Ganada', 'Descartada', 'Desistida', 'Perdida'].includes(tender.status);
+}
+
+function isTenderDueThisWeek(tender) {
+    const deadline = parseDate(tender.deadline);
+
+    if (!deadline || !isUpcomingTenderDue(tender)) {
+        return false;
+    }
+
+    return deadline >= today() && deadline <= endOfWeek(today());
+}
+
+function endOfWeek(date) {
+    const end = new Date(date);
+    const daysUntilSunday = (7 - end.getDay()) % 7;
+
+    end.setDate(end.getDate() + daysUntilSunday);
+    end.setHours(23, 59, 59, 999);
+
+    return end;
+}
+
+function previousMonthKey() {
+    return dateKey(addMonths(today(), -1)).slice(0, 7);
+}
+
+function tenderDeadlineMonth(tender) {
+    return tender.deadline?.slice(0, 7) ?? '';
+}
+
+function activeTenderTrendLabel(tenders) {
+    const activeTenders = tenders.filter(isTenderActive);
+    const currentMonthCount = activeTenders.filter((tender) => tenderDeadlineMonth(tender) === currentMonthKey()).length;
+    const previousMonthCount = activeTenders.filter((tender) => tenderDeadlineMonth(tender) === previousMonthKey()).length;
+    const change = previousMonthCount
+        ? Math.round(((currentMonthCount - previousMonthCount) / previousMonthCount) * 100)
+        : (currentMonthCount ? 100 : 0);
+    const prefix = change > 0 ? '+ ' : change < 0 ? '- ' : '';
+
+    return `${prefix}${Math.abs(change)}% vs. mes anterior`;
+}
+
+function trendToneClass(trend) {
+    return trend.trim().startsWith('-') ? 'text-rose-600' : 'text-emerald-600';
+}
+
 function tenderCountForUser(user) {
     return ganttLoadForUserOn(user, today());
 }
@@ -369,7 +418,15 @@ function averageWorkloadFor(users) {
 }
 
 function hasEconomicOffer(tender) {
-    return (Number(tender.economicOffer) || 0) > 0;
+    return !isEconomicOfferWaived(tender) && (Number(tender.economicOffer) || 0) > 0;
+}
+
+function isEconomicOfferWaived(tender) {
+    return Boolean(tender.economicOfferWaived);
+}
+
+function needsEconomicOffer(tender) {
+    return tender.status === 'En evaluacion' && !hasEconomicOffer(tender) && !isEconomicOfferWaived(tender);
 }
 
 function evaluatedTendersWithEconomicOffer(tenders) {
@@ -377,7 +434,7 @@ function evaluatedTendersWithEconomicOffer(tenders) {
 }
 
 function economicOfferTotal(tenders) {
-    return tenders.reduce((total, tender) => total + (Number(tender.economicOffer) || 0), 0);
+    return tenders.reduce((total, tender) => total + (hasEconomicOffer(tender) ? Number(tender.economicOffer) : 0), 0);
 }
 
 function averageEconomicOffer(tenders) {
@@ -388,8 +445,12 @@ function averageEconomicOffer(tenders) {
 
 function missingEconomicOfferTenders() {
     return visibleItems('tenders')
-        .filter((tender) => tender.status === 'En evaluacion' && !hasEconomicOffer(tender))
+        .filter(needsEconomicOffer)
         .sort((first, second) => first.deadline.localeCompare(second.deadline));
+}
+
+function missingEconomicOfferCount(tenders) {
+    return tenders.filter(needsEconomicOffer).length;
 }
 
 function overloadedUsers() {
@@ -814,8 +875,10 @@ function sectionActions() {
 
 function renderDashboard() {
     const tenders = visibleItems('tenders');
-    const active = tenders.filter((item) => !['Ganada', 'Descartada', 'Desistida', 'Perdida'].includes(item.status)).length;
+    const active = tenders.filter(isTenderActive).length;
+    const activeTrend = activeTenderTrendLabel(tenders);
     const due = tenders.filter(isUpcomingTenderDue).length;
+    const dueThisWeek = tenders.filter(isTenderDueThisWeek).length;
     const successRate = successRateFor(tenders);
     const workload = averageWorkloadFor(workloadAverageUsers());
     const missingOffers = missingEconomicOfferTenders();
@@ -823,9 +886,9 @@ function renderDashboard() {
     return `
         <section class="dashboard-metrics-frame">
             <div class="dashboard-metrics-row">
-                ${metricCard('Licitaciones activas', active, '+ 12% vs. mes anterior', 'folder', 'blue')}
-                ${metricCard('Entregas proximas', due, '+ 3 esta semana', 'calendar', 'teal')}
-                ${metricCard('Tasa de exito', `${successRate}%`, '20% referencia', 'chart', 'green')}
+                ${metricCard('Licitaciones activas', active, activeTrend, 'folder', 'blue', trendToneClass(activeTrend))}
+                ${metricCard('Entregas proximas', due, `${dueThisWeek ? `+ ${dueThisWeek}` : '0'} esta semana`, 'calendar', 'teal')}
+                ${metricCard('Tasa de exito', `${successRate}%`, successRateMeta(tenders), 'chart', 'green')}
                 ${metricCard('Carga del equipo', `${workload}%`, 'Media del equipo', 'team', 'violet')}
             </div>
         </section>
@@ -847,6 +910,14 @@ function successRateFor(tenders) {
     const closed = won + lost;
 
     return closed ? Math.round((won / closed) * 100) : 0;
+}
+
+function successRateMeta(tenders) {
+    const won = tenders.filter((item) => item.status === 'Ganada').length;
+    const lost = tenders.filter((item) => item.status === 'Perdida').length;
+    const closed = won + lost;
+
+    return closed ? `${won} ganadas de ${closed} cerradas` : 'Sin cerradas';
 }
 
 function renderEconomicOfferAlert(tenders) {
@@ -912,7 +983,7 @@ function renderWorkloadPanel() {
     `;
 }
 
-function metricCard(label, value, trend, icon, tone) {
+function metricCard(label, value, trend, icon, tone, trendTone = 'text-emerald-600') {
     return `
         <article class="rounded-lg border border-[#dfe6f2] bg-white p-6 shadow-sm">
             <div class="flex items-start justify-between gap-5">
@@ -926,7 +997,7 @@ function metricCard(label, value, trend, icon, tone) {
                     </div>
                 </div>
             </div>
-            <p class="mt-4 text-sm font-semibold text-emerald-600">${trend}</p>
+            <p class="mt-4 text-sm font-semibold ${trendTone}">${trend}</p>
         </article>
     `;
 }
@@ -964,6 +1035,10 @@ function tenderTableItems(items) {
 }
 
 function tenderColumnValue(item, column) {
+    if (column === 'economicOffer' && isEconomicOfferWaived(item)) {
+        return 'nula';
+    }
+
     if (['budget', 'economicOffer'].includes(column)) {
         return formatCurrency(item[column]).toLowerCase();
     }
@@ -976,6 +1051,10 @@ function tenderColumnValue(item, column) {
 }
 
 function tenderSortValue(item, column) {
+    if (column === 'economicOffer' && isEconomicOfferWaived(item)) {
+        return 0;
+    }
+
     if (['budget', 'economicOffer'].includes(column)) {
         return Number(item[column]) || 0;
     }
@@ -1077,6 +1156,10 @@ function cellFor(column, value, item = null) {
     }
 
     if (['budget', 'economicOffer'].includes(column)) {
+        if (column === 'economicOffer' && isEconomicOfferWaived(item)) {
+            return '<td><span class="status-pill status-slate">Nula</span></td>';
+        }
+
         return `<td>${formatCurrency(value)}</td>`;
     }
 
@@ -1413,7 +1496,7 @@ function renderExecutiveReport() {
                     <div>
                         <h3 class="text-sm font-bold text-[#21345d]">Presentaciones realizadas hoy</h3>
                         <div class="mt-3 space-y-2">
-                            ${report.presentations.map((tender) => reportItem(`${tender.title}`, `${tender.owner} · ${tender.code} · ${formatDate(tenderPresentationDate(tender))} · Oferta ${formatCurrency(tender.economicOffer)}`)).join('') || emptyReportItem('Sin presentaciones registradas hoy.')}
+                            ${report.presentations.map((tender) => reportItem(`${tender.title}`, `${tender.owner} · ${tender.code} · ${formatDate(tenderPresentationDate(tender))} · ${formatEconomicOffer(tender)}`)).join('') || emptyReportItem('Sin presentaciones registradas hoy.')}
                         </div>
                     </div>
                     <div>
@@ -1503,7 +1586,7 @@ function tenderPresentationDate(tender) {
 
 function executiveReportText(report) {
     const presentationLines = report.presentations.length
-        ? report.presentations.map((tender) => `- ${tender.title}: presentada por ${tender.owner}. Fecha registrada: ${formatDate(tenderPresentationDate(tender))}. Oferta economica: ${formatCurrency(tender.economicOffer)}.`).join('\n')
+        ? report.presentations.map((tender) => `- ${tender.title}: presentada por ${tender.owner}. Fecha registrada: ${formatDate(tenderPresentationDate(tender))}. Oferta economica: ${formatEconomicOffer(tender)}.`).join('\n')
         : '- No se han registrado presentaciones hoy.';
     const awardLines = report.awards.length
         ? report.awards.map((tender) => `- ${tender.title} (${tender.client}): ${tender.status}. Importe: ${formatCurrency(tender.budget)}. Responsable: ${tender.owner}.`).join('\n')
@@ -1555,6 +1638,10 @@ function formatCurrency(value) {
     }
 
     return new Intl.NumberFormat('es-ES', { style: 'currency', currency: 'EUR', minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(amount);
+}
+
+function formatEconomicOffer(tender) {
+    return isEconomicOfferWaived(tender) ? 'Oferta nula' : formatCurrency(tender.economicOffer);
 }
 
 function renderImportTenders() {
@@ -1638,7 +1725,7 @@ function importPreviewTable() {
                         <td>${formatCurrency(item.budget)}</td>
                         <td>${formatCurrency(item.economicOffer)}</td>
                         <td>${escapeHtml(item.owner)}${item.newUser ? '<p class="text-xs font-bold text-amber-600">Se creara usuario</p>' : ''}</td>
-                        <td>${statusPill(item.status)}${item.importAction === 'updateEconomicOffer' ? '<p class="text-xs font-bold text-blue-600">Actualiza oferta</p>' : ''}</td>
+                        <td>${statusPill(item.status)}${importActionLabel(item)}</td>
                     </tr>
                 `).join('')}
             </tbody>
@@ -1699,8 +1786,8 @@ function commitImportTenders() {
     selectedTenders.forEach((tender, index) => {
         const { importAction, importUpdateId, newUser, ...tenderData } = tender;
 
-        if (importAction === 'updateEconomicOffer' && importUpdateId) {
-            state.tenders = state.tenders.map((item) => item.id === importUpdateId ? { ...item, economicOffer: tender.economicOffer } : item);
+        if (importAction === 'updateTender' && importUpdateId) {
+            updateImportedTender(importUpdateId, tender, tender.importUpdateFields ?? []);
             return;
         }
 
@@ -1791,6 +1878,7 @@ function tenderFromImportRow(headers, row) {
         status: normalizeImportedStatus(value('estado')),
         budget: parseImportedCurrency(value('pblivaexc')),
         economicOffer: parseImportedCurrency(importedEconomicOfferValue(headers, row)),
+        economicOfferWaived: false,
         owner,
         importedResponsible: owner,
         newUser: !state.team.some((member) => member.name.toLowerCase() === owner.toLowerCase()),
@@ -1810,28 +1898,46 @@ function filterImportedTenders(tenders) {
     tenders.forEach((tender) => {
         const exactKey = importExactKey(tender);
         const statuslessKey = importStatuslessKey(tender);
-        const matchesWithDifferentStatus = (statuslessMatches.get(statuslessKey) ?? [])
-            .filter((match) => match.status !== tender.status);
+        const matchesWithChanges = (statuslessMatches.get(statuslessKey) ?? [])
+            .map((match) => ({
+                ...match,
+                importUpdateFields: changedImportedTenderFields(match, tender, match.status !== tender.status),
+            }))
+            .filter((match) => match.id && match.importUpdateFields.length);
 
         const existingTender = existingByExactKey.get(exactKey);
 
         if (existingTender) {
-            if (canImportedEconomicOfferUpdate(existingTender, tender)) {
+            const importUpdateFields = changedImportedTenderFields(existingTender, tender, false);
+
+            if (importUpdateFields.length) {
                 accepted.push({
                     ...tender,
-                    importAction: 'updateEconomicOffer',
+                    importAction: 'updateTender',
                     importUpdateId: existingTender.id,
-                    newUser: false,
+                    importUpdateFields,
+                    newUser: importsNewOwner(importUpdateFields, tender),
                 });
-                importWarnings.push(`Actualizacion: ${tender.code || tender.title} mantiene los datos en evaluacion y actualiza la oferta economica.`);
+                importWarnings.push(`Actualizacion: ${tender.code || tender.title} actualiza ${importUpdateFieldsLabel(importUpdateFields)}.`);
             }
 
             return;
         }
 
-        if (matchesWithDifferentStatus.length) {
-            const previousStatuses = [...new Set(matchesWithDifferentStatus.map((match) => match.status))].join(', ');
-            importWarnings.push(`Aviso: ${tender.code || tender.title} coincide con una fila existente salvo el estado (${previousStatuses} -> ${tender.status}).`);
+        if (matchesWithChanges.length) {
+            const previousStatuses = [...new Set(matchesWithChanges.map((match) => match.status))].join(', ');
+            const [matchingTender] = matchesWithChanges;
+
+            accepted.push({
+                ...tender,
+                importAction: 'updateTender',
+                importUpdateId: matchingTender.id,
+                importUpdateFields: matchingTender.importUpdateFields,
+                newUser: importsNewOwner(matchingTender.importUpdateFields, tender),
+            });
+            importWarnings.push(`Actualizacion: ${tender.code || tender.title} coincide con una fila existente (${previousStatuses} -> ${tender.status}) y actualiza ${importUpdateFieldsLabel(matchingTender.importUpdateFields)}.`);
+
+            return;
         }
 
         accepted.push(tender);
@@ -1849,19 +1955,78 @@ function importedEconomicOfferValue(headers, row) {
     return header ? cleanImportCell(row[headers.indexOf(header)] ?? '') : '';
 }
 
-function canImportedEconomicOfferUpdate(existingTender, importedTender) {
-    return existingTender.status === 'En evaluacion'
-        && importedTender.status === 'En evaluacion'
-        && normalizeImportValue(existingTender.economicOffer) !== normalizeImportValue(importedTender.economicOffer)
+function canImportedEconomicOfferChange(existingTender, importedTender) {
+    return normalizeImportValue(existingTender.economicOffer) !== normalizeImportValue(importedTender.economicOffer)
         && importedTender.economicOffer !== '';
+}
+
+function changedImportedTenderFields(existingTender, importedTender, allowStatusChange) {
+    return [
+        allowStatusChange && existingTender.status !== importedTender.status ? 'status' : '',
+        canImportedEconomicOfferChange(existingTender, importedTender)
+            && (allowStatusChange || (existingTender.status === 'En evaluacion' && importedTender.status === 'En evaluacion')) ? 'economicOffer' : '',
+        normalizeImportValue(existingTender.owner) !== normalizeImportValue(importedTender.owner) ? 'owner' : '',
+    ].filter(Boolean);
+}
+
+function updateImportedTender(importUpdateId, importedTender, importUpdateFields) {
+    const existingTender = state.tenders.find((item) => item.id === importUpdateId);
+
+    if (!existingTender) {
+        return;
+    }
+
+    if (importUpdateFields.includes('owner')) {
+        ensureImportedUser(importedTender.owner);
+    }
+
+    const updatedTender = {
+        ...existingTender,
+        status: importUpdateFields.includes('status') ? importedTender.status : existingTender.status,
+        economicOffer: importUpdateFields.includes('economicOffer') ? importedTender.economicOffer : existingTender.economicOffer,
+        economicOfferWaived: importUpdateFields.includes('economicOffer') ? false : existingTender.economicOfferWaived,
+        owner: importUpdateFields.includes('owner') ? importedTender.owner : existingTender.owner,
+        presentedAt: importUpdateFields.includes('status') && importedTender.status === 'En evaluacion' && existingTender.status !== 'En evaluacion'
+            ? new Date().toISOString()
+            : existingTender.presentedAt || '',
+    };
+
+    state.tenders = state.tenders.map((item) => item.id === importUpdateId ? updatedTender : item);
+    syncTenderPresentationEvent(updatedTender, existingTender);
 }
 
 function addStatuslessMatch(matches, tender) {
     const key = importStatuslessKey(tender);
     const current = matches.get(key) ?? [];
 
-    current.push({ status: tender.status });
+    current.push({ id: tender.id, status: tender.status, economicOffer: tender.economicOffer, owner: tender.owner });
     matches.set(key, current);
+}
+
+function importActionLabel(item) {
+    if (item.importAction !== 'updateTender') {
+        return '';
+    }
+
+    return `<p class="text-xs font-bold text-blue-600">Actualiza ${importUpdateFieldsLabel(item.importUpdateFields ?? [])}</p>`;
+}
+
+function importUpdateFieldsLabel(importUpdateFields) {
+    const labels = {
+        status: 'estado',
+        economicOffer: 'oferta',
+        owner: 'responsable',
+    };
+    const fieldLabels = importUpdateFields.map((field) => labels[field]).filter(Boolean);
+
+    return fieldLabels.length > 1
+        ? `${fieldLabels.slice(0, -1).join(', ')} y ${fieldLabels.at(-1)}`
+        : fieldLabels[0] ?? 'datos';
+}
+
+function importsNewOwner(importUpdateFields, tender) {
+    return importUpdateFields.includes('owner')
+        && !state.team.some((member) => member.name.toLowerCase() === tender.owner.toLowerCase());
 }
 
 function importExactKey(tender) {
@@ -1879,7 +2044,6 @@ function importStatuslessKey(tender) {
         tender.client,
         tender.deadline,
         tender.budget,
-        tender.owner,
     ].map(normalizeImportValue).join('|');
 }
 
@@ -2049,6 +2213,7 @@ function renderStatsBody() {
     const review = tenders.filter((item) => item.status === 'En evaluacion').length;
     const pending = tenders.filter((item) => item.status === 'En analisis').length;
     const lost = tenders.filter((item) => item.status === 'Perdida').length;
+    const successRate = successRateFor(tenders);
 
     return `
         <div class="flex items-center justify-between gap-4">
@@ -2062,8 +2227,8 @@ function renderStatsBody() {
             </div>
             <div>
                 <h3 class="text-sm font-bold">Ganadas vs. perdidas</h3>
-                <div class="mt-8 grid size-32 place-items-center rounded-full bg-[conic-gradient(#25b46b_0_${state.stats.targetWinRate}%,#f25468_${state.stats.targetWinRate}%_100%)] p-4">
-                    <div class="grid size-full place-items-center rounded-full bg-white text-xl font-bold">${state.stats.targetWinRate}%</div>
+                <div class="mt-8 grid size-32 place-items-center rounded-full bg-[conic-gradient(#25b46b_0_${successRate}%,#f25468_${successRate}%_100%)] p-4">
+                    <div class="grid size-full place-items-center rounded-full bg-white text-xl font-bold">${successRate}%</div>
                 </div>
             </div>
             <div>
@@ -2116,7 +2281,7 @@ function userStatsCard(user) {
     const totalBudget = evaluated.reduce((total, tender) => total + (Number(tender.budget) || 0), 0);
     const preparedBudget = prepared.reduce((total, tender) => total + (Number(tender.budget) || 0), 0);
     const offerTotal = economicOfferTotal(evaluatedTendersWithEconomicOffer(tenders));
-    const missingOfferCount = evaluated.filter((tender) => !hasEconomicOffer(tender)).length;
+    const missingOfferCount = missingEconomicOfferCount(evaluated);
     const workload = workloadForUser(user);
     const closed = won + lost;
     const successRate = closed ? Math.round((won / closed) * 100) : 0;
@@ -2241,7 +2406,7 @@ function viewEntriesFor(entity, item) {
             ['workload', `${workloadForUser(item)}%`],
             ['activeTenders', tenderCountForUser(item)],
             ['economicOfferTotal', economicOfferTotal(evaluatedTendersWithEconomicOffer(tenders))],
-            ['missingEconomicOffers', evaluated.filter((tender) => !hasEconomicOffer(tender)).length],
+            ['missingEconomicOffers', missingEconomicOfferCount(evaluated)],
             ['status', item.status],
             ['passwordResetAt', item.passwordResetAt],
         ];
@@ -2263,6 +2428,7 @@ function viewEntriesFor(entity, item) {
             ['status', item.status],
             ['budget', item.budget],
             ['economicOffer', item.economicOffer],
+            ['economicOfferWaived', item.economicOfferWaived],
             ['owner', item.owner],
             ['presentedAt', item.presentedAt],
             ['adjudicationDate', item.adjudicationDate],
@@ -2283,6 +2449,7 @@ function viewLabelFor(key) {
         completedAt: 'Completado el',
         deadline: 'Fin aceptacion ofertas',
         economicOffer: 'Oferta economica',
+        economicOfferWaived: 'Oferta economica nula',
         economicOfferTotal: 'Oferta economica acumulada',
         lot: 'Lote',
         missingEconomicOffers: 'Ofertas economicas pendientes',
@@ -2340,6 +2507,11 @@ function openForm(entity, id = null, preset = {}) {
             </div>
         </form>
     `;
+
+    if (entity === 'tenders') {
+        syncEconomicOfferWaivedControl(modalBody.querySelector('[data-form]'));
+    }
+
     showModal();
 }
 
@@ -2383,7 +2555,9 @@ function fieldMarkup(name, label, type, options, value, isRequired = true) {
     }
 
     if (type === 'checkbox') {
-        return `<label class="flex items-center gap-3 rounded-lg border border-[#dfe6f2] p-4 text-sm font-bold text-[#21345d]"><input type="checkbox" name="${name}" data-preparation-other ${value ? 'checked' : ''}> ${label}</label>`;
+        const dataAttribute = name === 'preparationOther' ? ' data-preparation-other' : name === 'economicOfferWaived' ? ' data-economic-offer-waived' : '';
+
+        return `<label class="flex items-center gap-3 rounded-lg border border-[#dfe6f2] p-4 text-sm font-bold text-[#21345d]"><input type="checkbox" name="${name}"${dataAttribute} ${value ? 'checked' : ''}> ${label}</label>`;
     }
 
     if (type === 'conditionalDate') {
@@ -2399,7 +2573,9 @@ function fieldMarkup(name, label, type, options, value, isRequired = true) {
     }
 
     if (type === 'currency') {
-        return `<label class="field-label">${label}<input class="field-control" type="number" name="${name}" value="${escapeHtml(value)}" min="0" step="0.01" inputmode="decimal"${requiredAttribute(isRequired)}></label>`;
+        const dataAttribute = name === 'economicOffer' ? ' data-economic-offer-input' : '';
+
+        return `<label class="field-label">${label}<input class="field-control" type="number" name="${name}" value="${escapeHtml(value)}" min="0" step="0.01" inputmode="decimal"${dataAttribute}${requiredAttribute(isRequired)}></label>`;
     }
 
     return `<label class="field-label">${label}<input class="field-control" type="${type}" name="${name}" value="${escapeHtml(value)}"${requiredAttribute(isRequired)}></label>`;
@@ -2493,6 +2669,8 @@ function saveForm(form) {
 
 function prepareFormData(entity, data, existingItem = null) {
     if (entity === 'tenders') {
+        data.economicOfferWaived = data.economicOfferWaived === 'on';
+        data.economicOffer = data.economicOfferWaived ? '' : (data.economicOffer ?? existingItem?.economicOffer ?? '');
         data.presentedAt = data.status === 'En evaluacion' && existingItem?.status !== 'En evaluacion'
             ? new Date().toISOString()
             : existingItem?.presentedAt || '';
@@ -2684,6 +2862,21 @@ function toggleReceptionDate(checkbox) {
     }
 
     if (!checkbox.checked) {
+        input.value = '';
+    }
+}
+
+function syncEconomicOfferWaivedControl(form) {
+    const checkbox = form?.querySelector('[data-economic-offer-waived]');
+    const input = form?.querySelector('[data-economic-offer-input]');
+
+    if (!checkbox || !input) {
+        return;
+    }
+
+    input.disabled = checkbox.checked;
+
+    if (checkbox.checked) {
         input.value = '';
     }
 }
@@ -2927,6 +3120,10 @@ document.addEventListener('change', (event) => {
 
     if (event.target.matches('[data-preparation-other]')) {
         toggleReceptionDate(event.target);
+    }
+
+    if (event.target.matches('[data-economic-offer-waived]')) {
+        syncEconomicOfferWaivedControl(event.target.closest('form'));
     }
 
     if (event.target.matches('[data-mobile-nav]')) {
