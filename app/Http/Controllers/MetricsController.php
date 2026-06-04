@@ -34,6 +34,13 @@ class MetricsController extends Controller
         return response()->json($this->metrics->report($month, $scope, $isAdmin, $viewer));
     }
 
+    public function notifications(Request $request)
+    {
+        [$scope] = $this->context($request);
+
+        return response()->json($this->metrics->notifications($scope));
+    }
+
     public function gantt(Request $request)
     {
         [$scope] = $this->context($request);

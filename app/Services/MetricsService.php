@@ -18,17 +18,28 @@ class MetricsService
 {
     private array $settings;
 
+    private array $adminNames;
+
     public function __construct()
     {
         $this->settings = app(SettingsReader::class)->settings();
+        // Las licitaciones cuyo responsable es un admin no cuentan en las metricas.
+        $this->adminNames = Member::query()->where('role', 'admin')
+            ->pluck('name')->filter()->values()->all();
     }
 
     private const CLOSED = ['Ganada', 'Descartada', 'Desistida', 'Perdida'];
 
-    /** Query base de tenders, acotada al usuario si hay scope. */
+    /** Query base de tenders, acotada al usuario si hay scope. Excluye las de responsable admin. */
     private function tenders(?string $scope)
     {
         $query = Tender::query();
+
+        // Excluir licitaciones cuyo responsable (owner) es un administrador:
+        // no cuentan como activas, ni en tasa de exito, ni en el informe.
+        if (! empty($this->adminNames)) {
+            $query->whereNotIn('owner', $this->adminNames);
+        }
 
         if ($scope) {
             $query->where(function ($q) use ($scope) {
@@ -219,6 +230,48 @@ class MetricsService
                 'averageEconomicOffer' => $offerCount ? (int) round($offerTotal / $offerCount) : 0,
                 'averageWorkload' => $avgWorkload,
             ],
+        ];
+    }
+
+    // ---------- NOTIFICACIONES (independiente de la seccion) ----------
+
+    /**
+     * Alertas para la campana superior: presentaciones de los proximos 7 dias y
+     * ofertas economicas pendientes. NO excluye licitaciones de responsable admin
+     * (el admin debe ver todas las alertas).
+     */
+    public function notifications(?string $scope): array
+    {
+        $today = CarbonImmutable::now()->startOfDay();
+        $in7 = $today->addDays(7);
+
+        $presentationsQuery = \App\Models\Milestone::query()
+            ->where('type', 'Presentacion')
+            ->where('date', '>=', $today->format('Y-m-d'))
+            ->where('date', '<=', $in7->format('Y-m-d').'T23:59');
+        if ($scope) {
+            $presentationsQuery->where('owner', $scope);
+        }
+        $presentations = $presentationsQuery->orderBy('date')->limit(100)->get();
+
+        $offerQuery = Tender::query()
+            ->where('status', 'En evaluacion')
+            ->where(fn ($q) => $q->whereNull('economic_offer')->orWhere('economic_offer', '')->orWhereRaw('CAST(economic_offer AS DECIMAL(20,2)) <= 0'))
+            ->where('economic_offer_waived', false);
+        if ($scope) {
+            $offerQuery->where(function ($q) use ($scope) {
+                $q->where('owner', $scope)
+                    ->orWhere(fn ($inner) => $inner->where('co_authored', true)->where('co_author', $scope));
+            });
+        }
+        $missingTotal = (clone $offerQuery)->count();
+        $missingOffers = $offerQuery->orderBy('deadline')->limit(50)->get();
+
+        return [
+            'presentations' => EntityFields::collectionToCamel($presentations, EntityFields::MILESTONE),
+            'presentationsTotal' => $presentations->count(),
+            'missingOffers' => EntityFields::collectionToCamel($missingOffers, EntityFields::TENDER),
+            'missingOffersTotal' => $missingTotal,
         ];
     }
 

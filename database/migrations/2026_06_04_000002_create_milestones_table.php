@@ -10,8 +10,8 @@ return new class extends Migration
     {
         Schema::create('milestones', function (Blueprint $table) {
             $table->string('id')->primary();
-            $table->string('title')->nullable();
-            $table->string('tender')->nullable();
+            $table->text('title')->nullable();
+            $table->text('tender')->nullable();
             $table->string('tender_id')->nullable();
             $table->string('type')->nullable();
             $table->boolean('preparation_other')->default(false);

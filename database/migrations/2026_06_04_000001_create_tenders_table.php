@@ -11,9 +11,9 @@ return new class extends Migration
         Schema::create('tenders', function (Blueprint $table) {
             $table->string('id')->primary();
             $table->string('code')->nullable();
-            $table->string('title')->nullable();
+            $table->text('title')->nullable();
             $table->string('lot')->nullable();
-            $table->string('client')->nullable();
+            $table->string('client', 512)->nullable();
             $table->string('deadline')->nullable();
             $table->string('status')->nullable();
             $table->string('budget')->nullable();

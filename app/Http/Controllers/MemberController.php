@@ -68,4 +68,24 @@ class MemberController extends Controller
 
         return response()->json(EntityFields::toCamel($member->fresh(), EntityFields::MEMBER));
     }
+
+    /** Imagen de perfil: cada usuario sube/borra la suya (data URL o null para quitarla). */
+    public function avatar(Request $request, Member $member)
+    {
+        $avatar = $request->input('avatar');
+
+        if ($avatar !== null) {
+            if (! is_string($avatar) || ! str_starts_with($avatar, 'data:image/')) {
+                return response()->json(['message' => 'La imagen no es valida.'], 422);
+            }
+            // Limite defensivo (~1.5 MB de data URL); el cliente la redimensiona antes.
+            if (strlen($avatar) > 1_500_000) {
+                return response()->json(['message' => 'La imagen es demasiado grande.'], 422);
+            }
+        }
+
+        $member->update(['avatar' => $avatar]);
+
+        return response()->json(EntityFields::toCamel($member->fresh(), EntityFields::MEMBER));
+    }
 }

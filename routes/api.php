@@ -19,6 +19,7 @@ Route::apiResource('milestones', MilestoneController::class)->except(['show']);
 
 Route::apiResource('members', MemberController::class)->except(['show']);
 Route::put('members/{member}/password', [MemberController::class, 'resetPassword']);
+Route::put('members/{member}/avatar', [MemberController::class, 'avatar']);
 
 Route::get('settings', [SettingsController::class, 'show']);
 Route::put('settings', [SettingsController::class, 'update']);
@@ -27,6 +28,7 @@ Route::get('metrics/dashboard', [MetricsController::class, 'dashboard']);
 Route::get('metrics/overview', [MetricsController::class, 'overview']);
 Route::get('metrics/report', [MetricsController::class, 'report']);
 Route::get('metrics/gantt', [MetricsController::class, 'gantt']);
+Route::get('metrics/notifications', [MetricsController::class, 'notifications']);
 
 Route::get('search', [SearchController::class, 'index']);
 

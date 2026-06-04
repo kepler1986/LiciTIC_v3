@@ -51,6 +51,7 @@ class EntityFields
         'status' => 'status',
         'password' => 'password',
         'passwordResetAt' => 'password_reset_at',
+        'avatar' => 'avatar',
     ];
 
     /** Modelo BD -> array camelCase para el frontend (incluye updatedAt para bloqueo optimista). */

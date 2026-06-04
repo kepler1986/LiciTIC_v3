@@ -66,7 +66,7 @@ const schemas = {
         ['receptionDate', 'Fecha de recepcion', 'conditionalDate'], ['date', 'Fecha fin', 'date'], ['status', 'Estado', 'select', ['Pendiente', 'Confirmado', 'Critico', 'Completado']],
     ],
     team: [
-        ['name', 'Nombre'], ['username', 'Usuario'], ['role', 'Rol', 'select', ['admin', 'user']], ['email', 'Email', 'email'],
+        ['name', 'Nombre'], ['username', 'Usuario'], ['role', 'Rol', 'select', ['admin', 'manager', 'user']], ['email', 'Email', 'email'],
         ['status', 'Estado', 'select', ['Activo', 'Ausente', 'Externo']],
     ],
     stats: [
@@ -218,9 +218,11 @@ const api = {
 // Parametros de scoping: el servidor acota por usuario cuando no es admin.
 function scopeParams(extra = {}) {
     const user = currentUser();
-    const params = { isAdmin: isAdmin() ? 1 : 0, viewer: user?.name ?? '', ...extra };
+    // Admin y manager ven todos los datos (sin filtro de scope); el resto, solo lo suyo.
+    const seeAll = canSeeAll();
+    const params = { isAdmin: seeAll ? 1 : 0, viewer: user?.name ?? '', ...extra };
 
-    if (!isAdmin() && user) {
+    if (!seeAll && user) {
         params.scope = user.name;
     }
 
@@ -281,8 +283,32 @@ function isAdmin() {
     return currentUser()?.role === 'admin';
 }
 
+function isManager() {
+    return currentUser()?.role === 'manager';
+}
+
+// Admin y manager ven todos los datos y operan sobre todo el equipo.
+function canSeeAll() {
+    return isAdmin() || isManager();
+}
+
+// Que secciones puede ver cada rol: 'admin' solo admin; 'equipo'/'importar'
+// admin y manager; el resto, todos.
+function sectionAllowed(sectionId) {
+    if (sectionId === 'admin') {
+        return isAdmin();
+    }
+
+    // Equipo, Importar, Estadisticas e Informe: solo admin y manager (no el rol user).
+    if (['equipo', 'importar', 'estadisticas', 'informe'].includes(sectionId)) {
+        return canSeeAll();
+    }
+
+    return true;
+}
+
 function userNames() {
-    if (!isAdmin()) {
+    if (!canSeeAll()) {
         return [currentUser()?.name].filter(Boolean);
     }
 
@@ -553,7 +579,7 @@ function overloadedUsers() {
 // los subconjuntos ya cargados para la vista actual.
 function visibleItems(entity) {
     if (entity === 'team') {
-        return isAdmin() ? state.team : [currentUser()].filter(Boolean);
+        return canSeeAll() ? state.team : [currentUser()].filter(Boolean);
     }
 
     return state[entity] ?? [];
@@ -564,12 +590,18 @@ function visibleEvents() {
 }
 
 function canCreate(entity) {
-    return isAdmin() || ['tenders', 'events'].includes(entity);
+    // Manager crea como admin (incluye miembros); usuarios normales, solo licitaciones e hitos.
+    return canSeeAll() || ['tenders', 'events'].includes(entity);
 }
 
 function canEdit(entity, item = null) {
     if (isAdmin()) {
         return true;
+    }
+
+    // Manager puede editar todo salvo los parametros globales (seccion Admin).
+    if (isManager()) {
+        return !['settings', 'stats'].includes(entity);
     }
 
     const user = currentUser();
@@ -585,6 +617,7 @@ function canEdit(entity, item = null) {
     return item.owner === user.name || item.coAuthor === user.name || item.person === user.name;
 }
 
+// Borrar es exclusivo de admin: el manager no puede eliminar nada.
 function canDelete() {
     return isAdmin();
 }
@@ -829,7 +862,7 @@ function setSection(section) {
 }
 
 function renderChrome() {
-    const availableSections = sections.filter((item) => isAdmin() || !['admin', 'equipo', 'importar'].includes(item.id));
+    const availableSections = sections.filter((item) => sectionAllowed(item.id));
     const user = currentUser();
 
     nav.innerHTML = availableSections.map((item) => `
@@ -842,7 +875,14 @@ function renderChrome() {
     mobileNav.innerHTML = availableSections.map((item) => `<option value="${item.id}" ${item.id === currentSection ? 'selected' : ''}>${item.label}</option>`).join('');
     document.querySelector('[data-current-user-name]').textContent = user?.name ?? '';
     document.querySelector('[data-current-user-role]').textContent = auth?.impersonatorId ? `personificando ${user?.role}` : user?.role ?? '';
-    document.querySelector('[data-profile-avatar]').textContent = initials(user?.name ?? '');
+    const avatarEl = document.querySelector('[data-profile-avatar]');
+    if (user?.avatar) {
+        avatarEl.classList.add('overflow-hidden');
+        avatarEl.innerHTML = `<img src="${user.avatar}" alt="${escapeHtml(user.name)}" class="size-full object-cover">`;
+    } else {
+        avatarEl.classList.remove('overflow-hidden');
+        avatarEl.textContent = initials(user?.name ?? '');
+    }
     document.querySelector('[data-notification-count]').textContent = notificationCount();
 }
 
@@ -855,7 +895,7 @@ async function render() {
     }
 
     applySettings();
-    if (!isAdmin() && ['admin', 'equipo', 'importar'].includes(currentSection)) {
+    if (!sectionAllowed(currentSection)) {
         currentSection = 'inicio';
     }
     renderChrome();
@@ -864,7 +904,9 @@ async function render() {
     const sectionAtStart = currentSection;
 
     try {
-        await loadSectionData(currentSection);
+        // Las notificaciones se cargan en cada render, independientes de la seccion,
+        // para que el badge no dependa de los datos de la vista actual.
+        await Promise.all([loadSectionData(currentSection), loadNotifications()]);
     } catch (error) {
         if (token !== renderToken) {
             return;
@@ -994,6 +1036,17 @@ async function loadSectionData(section) {
 
     // importar / busqueda no necesitan precarga (usan settings/equipo ya cargados
     // o cargan bajo demanda en sus propias acciones).
+}
+
+// Carga las alertas (presentaciones proximas + ofertas pendientes) del servidor.
+// Persiste en view.notifications entre secciones, asi el badge nunca cae a 0 por
+// estar en una vista que no carga eventos/ofertas. Errores se ignoran (mantiene el valor previo).
+async function loadNotifications() {
+    try {
+        view.notifications = await api.get('/api/metrics/notifications', scopeParams());
+    } catch {
+        // se conserva el ultimo valor conocido
+    }
 }
 
 let workloadMap = {};
@@ -1284,7 +1337,7 @@ function tableFor(entity, items, compact = false) {
 
     const labels = {
         title: 'Objeto', client: 'Organismo', code: 'Expediente', lot: 'Lote', deadline: 'Fin aceptacion ofertas', budget: 'PBL', economicOffer: 'Oferta economica', status: 'Estado', owner: 'Responsable', coAuthor: 'Coautor',
-        name: 'Nombre', type: 'Tipo', updated: 'Actualizado',
+        name: 'Nombre', type: 'Tipo', updated: 'Actualizado', role: 'Rol',
         email: 'Email', username: 'Usuario', workload: 'Carga', passwordResetAt: 'Password',
     };
 
@@ -1395,6 +1448,18 @@ function renderCalendar() {
     `;
 }
 
+// Color del hito en el calendario segun su estado: [clase pildora, clase punto].
+function calendarEventStyle(event) {
+    const byStatus = {
+        Critico: ['bg-rose-100 text-rose-800 hover:bg-rose-200', 'bg-rose-500'],
+        Confirmado: ['bg-emerald-100 text-emerald-800 hover:bg-emerald-200', 'bg-emerald-500'],
+        Completado: ['bg-slate-100 text-slate-600 hover:bg-slate-200', 'bg-slate-400'],
+        Pendiente: ['bg-blue-100 text-blue-800 hover:bg-blue-200', 'bg-blue-500'],
+    };
+
+    return byStatus[event.status] ?? ['bg-blue-100 text-blue-800 hover:bg-blue-200', 'bg-blue-500'];
+}
+
 function renderCalendarPreview() {
     const monthStart = startOfMonth(calendarCursor);
     const monthEnd = new Date(monthStart.getFullYear(), monthStart.getMonth() + 1, 0);
@@ -1419,25 +1484,34 @@ function renderCalendarPreview() {
             ${['LUN', 'MAR', 'MIE', 'JUE', 'VIE', 'SAB', 'DOM'].map((day) => `<div class="border-b border-r border-[#e7edf6] py-3">${day}</div>`).join('')}
             ${calendarCells.map((day) => {
                 if (!day) {
-                    return '<div class="min-h-20 border-b border-r border-[#e7edf6] bg-[#f8fafd]"></div>';
+                    return '<div class="min-h-24 border-b border-r border-[#e7edf6] bg-[#f8fafd]"></div>';
                 }
 
                 const date = dateKey(day);
+                const isToday = date === todayIso();
                 const dayEvents = events.filter((item) => {
                     const eventDate = parseDate(item.date);
 
                     return eventDate && dateKey(eventDate) === date;
                 });
-                const mainEvent = dayEvents[0];
 
                 return `
-                    <button class="relative min-h-20 border-b border-r border-[#e7edf6] p-2 text-left hover:bg-blue-50" type="button" data-action="${mainEvent ? 'view' : 'new-date'}" data-entity="events" data-id="${mainEvent?.id ?? ''}" data-date="${date}">
-                        <span class="font-semibold">${day.getDate()}</span>
-                        <span class="mt-2 grid gap-1">
-                            ${dayEvents.slice(0, 2).map((event) => `<span class="event-pill event-blue">${escapeHtml(event.title)}</span>`).join('')}
-                            ${dayEvents.length > 2 ? `<span class="text-[11px] font-bold text-[#53658b]">+${dayEvents.length - 2} mas</span>` : ''}
-                        </span>
-                    </button>
+                    <div class="group relative flex min-h-24 flex-col border-b border-r border-[#e7edf6] p-1.5 ${isToday ? 'bg-blue-50/40' : ''}">
+                        <div class="flex items-center justify-between">
+                            <span class="text-xs font-bold ${isToday ? 'grid size-6 place-items-center rounded-full bg-blue-700 text-white' : 'text-[#12244f]'}">${day.getDate()}</span>
+                            ${canCreate('events') ? `<button class="rounded px-1 text-sm font-bold leading-none text-[#9fb0cc] hover:bg-blue-100 hover:text-blue-700" type="button" data-action="new-date" data-entity="events" data-date="${date}" title="Nuevo hito en este dia">+</button>` : ''}
+                        </div>
+                        <div class="mt-1 flex flex-col gap-1">
+                            ${dayEvents.map((event) => {
+                                const [pill, dot] = calendarEventStyle(event);
+
+                                return `<button class="flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-left text-[11px] font-semibold ${pill}" type="button" data-action="view" data-entity="events" data-id="${event.id}" title="${escapeHtml(event.title)} (${escapeHtml(event.status)})">
+                                    <span class="size-1.5 shrink-0 rounded-full ${dot}"></span>
+                                    <span class="truncate">${escapeHtml(event.title)}</span>
+                                </button>`;
+                            }).join('')}
+                        </div>
+                    </div>
                 `;
             }).join('')}
         </div>
@@ -1459,12 +1533,14 @@ function upcomingPresentations() {
 }
 
 function notificationCount() {
-    return upcomingPresentations().length + (view.dashboard?.missingOffersTotal ?? 0);
+    const n = view.notifications;
+
+    return n ? ((n.presentationsTotal ?? 0) + (n.missingOffersTotal ?? 0)) : 0;
 }
 
 function renderNotifications() {
-    const presentations = upcomingPresentations();
-    const missingOffers = view.dashboard?.missingOffers ?? [];
+    const presentations = view.notifications?.presentations ?? [];
+    const missingOffers = view.notifications?.missingOffers ?? [];
 
     modalTitle.textContent = 'Notificaciones';
     modalBody.innerHTML = `
@@ -1636,8 +1712,10 @@ function renderGantt() {
                     ${days.map((day) => `<div class="gantt-head-cell text-center"><span>${shortDateLabel(day)}</span><small>${shortWeekday(day)}</small></div>`).join('')}
                 </div>
                 ${tenders.map((tender) => ganttTenderRow(tender, days)).join('') || '<div class="p-5 text-sm font-semibold text-[#7082a4]">No hay licitaciones en preparacion futuras asignadas a usuarios.</div>'}
-                <div class="gantt-summary-title">Carga diaria por persona - h/tarea concurrentes</div>
-                ${users.map((user) => ganttUserLoadRow(user, days)).join('')}
+                ${canSeeAll() ? `
+                    <div class="gantt-summary-title">Carga diaria por persona - h/tarea concurrentes</div>
+                    ${users.map((user) => ganttUserLoadRow(user, days)).join('')}
+                ` : ''}
             </div>
         </section>
     `;
@@ -2610,13 +2688,30 @@ function renderDeadlineList() {
 }
 
 function findEntityItem(entity, id) {
-    const inState = (state[entity] ?? []).find((record) => record.id === id);
+    // Busca el registro en cualquier caché cargada: la vista actual, los
+    // resultados de busqueda y los paneles de metricas (que muestran licitaciones
+    // que no estan en state.tenders, p.ej. ofertas pendientes, informe o gantt).
+    const pools = [
+        state[entity] ?? [],
+        (searchResultsData[entity] ?? []).map((record) => record.item),
+    ];
 
-    if (inState) {
-        return inState;
+    if (entity === 'tenders') {
+        pools.push(view.dashboard?.missingOffers ?? []);
+        pools.push(view.report?.presentationsToday ?? []);
+        pools.push(view.report?.awardsToday ?? []);
+        pools.push(view.gantt?.tenders ?? []);
     }
 
-    return (searchResultsData[entity] ?? []).map((record) => record.item).find((record) => record.id === id) ?? null;
+    for (const pool of pools) {
+        const found = pool.find((record) => record.id === id);
+
+        if (found) {
+            return found;
+        }
+    }
+
+    return null;
 }
 
 function openView(entity, id) {
@@ -3144,6 +3239,96 @@ function handleFaviconUpload(input) {
     reader.readAsDataURL(file);
 }
 
+// Modal "Mi perfil": el usuario sube o quita su imagen de perfil.
+function openProfile() {
+    const user = currentUser();
+
+    if (!user) {
+        return;
+    }
+
+    modalTitle.textContent = 'Mi perfil';
+    modalBody.innerHTML = `
+        <div class="grid gap-5">
+            <div class="flex items-center gap-4">
+                <span class="grid size-20 shrink-0 place-items-center overflow-hidden rounded-full bg-[#f1d3c4] text-xl font-bold text-[#3e251d]">
+                    ${user.avatar ? `<img src="${user.avatar}" alt="" class="size-full object-cover">` : escapeHtml(initials(user.name))}
+                </span>
+                <div>
+                    <p class="text-base font-bold">${escapeHtml(user.name)}</p>
+                    <p class="text-sm font-semibold text-[#7082a4]">${escapeHtml(user.username)} · ${escapeHtml(user.role)}</p>
+                </div>
+            </div>
+            <label class="field-label">Imagen de perfil
+                <input class="field-control" type="file" accept="image/png,image/jpeg,image/webp" data-avatar-input>
+            </label>
+            <p class="text-xs font-semibold text-[#7082a4]">La imagen se recorta y redimensiona automaticamente. Formatos: PNG, JPG, WEBP.</p>
+            <div class="flex items-center justify-between gap-3 pt-2">
+                ${user.avatar ? '<button class="link-danger" type="button" data-action="remove-avatar">Quitar imagen</button>' : '<span></span>'}
+                <button class="btn-secondary" type="button" data-close-modal>Cerrar</button>
+            </div>
+        </div>
+    `;
+    showModal();
+}
+
+// Redimensiona/recorta la imagen a un cuadrado en cliente para no guardar archivos enormes.
+function resizeImageToDataUrl(file, size = 256) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+
+        reader.onerror = reject;
+        reader.onload = () => {
+            const image = new Image();
+
+            image.onerror = reject;
+            image.onload = () => {
+                const canvas = document.createElement('canvas');
+                canvas.width = size;
+                canvas.height = size;
+                const ctx = canvas.getContext('2d');
+                const scale = Math.max(size / image.width, size / image.height);
+                const width = image.width * scale;
+                const height = image.height * scale;
+
+                ctx.drawImage(image, (size - width) / 2, (size - height) / 2, width, height);
+                resolve(canvas.toDataURL('image/jpeg', 0.85));
+            };
+            image.src = reader.result;
+        };
+        reader.readAsDataURL(file);
+    });
+}
+
+async function handleAvatarUpload(input) {
+    const file = input.files?.[0];
+
+    if (!file) {
+        return;
+    }
+
+    try {
+        const dataUrl = await resizeImageToDataUrl(file, 256);
+        await api.mutate('PUT', `/api/members/${currentUser().id}/avatar`, { avatar: dataUrl });
+        await refreshGlobals();
+        renderChrome();
+        openProfile();
+    } catch (error) {
+        handleMutationError(error);
+    }
+}
+
+async function removeAvatar() {
+    try {
+        await api.mutate('PUT', `/api/members/${currentUser().id}/avatar`, { avatar: null });
+        await refreshGlobals();
+        renderChrome();
+        openProfile();
+    } catch (error) {
+        handleMutationError(error);
+    }
+}
+
 // Descarga una copia completa (datos + configuracion) como archivo JSON.
 async function exportBackup() {
     try {
@@ -3386,7 +3571,7 @@ document.addEventListener('click', (event) => {
     }
 
     if (trigger.matches('[data-profile]')) {
-        openView('team', currentUser()?.id);
+        openProfile();
         return;
     }
 
@@ -3427,6 +3612,8 @@ document.addEventListener('click', (event) => {
         resetSettings();
     } else if (action === 'reset-status-colors') {
         resetStatusColors();
+    } else if (action === 'remove-avatar') {
+        removeAvatar();
     } else if (action === 'export-backup') {
         exportBackup();
     } else if (action === 'import-backup') {
@@ -3512,6 +3699,10 @@ function login(form) {
 document.addEventListener('change', (event) => {
     if (event.target.matches('[data-favicon-input]')) {
         handleFaviconUpload(event.target);
+    }
+
+    if (event.target.matches('[data-avatar-input]')) {
+        handleAvatarUpload(event.target);
     }
 
     if (event.target.matches('[data-preparation-other]')) {
