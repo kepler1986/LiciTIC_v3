@@ -41,6 +41,8 @@ const defaults = {
         primaryColor: '#1d4ed8',
         favicon: '',
         passwordPolicy: 'Minimo 4 caracteres; se aceptan 4 digitos.',
+        coAuthorOwnerLoadPercent: '75',
+        coAuthorLoadPercent: '50',
         statusColors: {
             'En analisis': '#f59e0b',
             'En preparacion': '#2563eb',
@@ -57,7 +59,7 @@ const schemas = {
     tenders: [
         ['code', 'Expediente'], ['title', 'Objeto'], ['lot', 'Lote'], ['client', 'Organismo'], ['deadline', 'Fecha y hora fin aceptacion ofertas', 'datetime-local'],
         ['status', 'Estado', 'select', ['En analisis', 'En preparacion', 'En evaluacion', 'Descartada', 'Desistida', 'Perdida', 'Ganada']],
-        ['budget', 'PBL', 'currency'], ['economicOffer', 'Oferta economica', 'currency'], ['economicOfferWaived', 'Anular oferta economica', 'checkbox'], ['owner', 'Responsable'], ['adjudicationDate', 'Fecha adjudicacion recibida', 'optionalDate'], ['description', 'Descripcion', 'textarea'],
+        ['budget', 'PBL', 'currency'], ['economicOffer', 'Oferta economica', 'currency'], ['economicOfferWaived', 'Anular oferta economica', 'checkbox'], ['owner', 'Responsable'], ['coAuthored', 'Coautoria', 'checkbox'], ['coAuthor', 'Responsable coautor'], ['adjudicationDate', 'Fecha adjudicacion recibida', 'optionalDate'], ['description', 'Descripcion', 'textarea'],
     ],
     events: [
         ['title', 'Titulo'], ['tender', 'Licitacion', 'tenderSelect'], ['type', 'Tipo'], ['preparationOther', 'Preparacion-Otros', 'checkbox'],
@@ -77,6 +79,8 @@ const schemas = {
         ['logoLetter', 'Inicial del logo'],
         ['primaryColor', 'Color principal', 'color'],
         ['passwordPolicy', 'Politica de contrasenas', 'textarea'],
+        ['coAuthorOwnerLoadPercent', 'Carga autor en coautoria %', 'percentage'],
+        ['coAuthorLoadPercent', 'Carga coautor en coautoria %', 'percentage'],
     ],
 };
 
@@ -204,6 +208,8 @@ function normalizeState(nextState) {
         status: statusMap[tender.status] ?? tender.status,
         economicOffer: tender.economicOffer ?? '',
         economicOfferWaived: Boolean(tender.economicOfferWaived),
+        coAuthored: Boolean(tender.coAuthored && tender.coAuthor),
+        coAuthor: tender.coAuthored ? (tender.coAuthor ?? '') : '',
         presentedAt: tender.presentedAt || ((statusMap[tender.status] ?? tender.status) === 'En evaluacion' ? (tender.deadline || '') : ''),
     }));
 
@@ -402,7 +408,51 @@ function tenderCountForUser(user) {
 }
 
 function workloadForUser(user) {
-    return tenderCountForUser(user) * 33;
+    return Math.round(tenderCountForUser(user) * 33 * 100) / 100;
+}
+
+function formatLoadValue(value) {
+    const rounded = Math.round(value * 100) / 100;
+
+    return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(2).replace(/0$/, '');
+}
+
+function coAuthorLoadShare(setting) {
+    const percent = Number(state.settings[setting]);
+
+    return Number.isFinite(percent) ? percent / 100 : Number(defaults.settings[setting]) / 100;
+}
+
+function tenderLoadForUser(tender, user) {
+    if (!user || !tender) {
+        return 0;
+    }
+
+    const hasCoAuthor = Boolean(tender.coAuthored && tender.coAuthor);
+
+    if (tender.owner === user.name) {
+        return hasCoAuthor ? coAuthorLoadShare('coAuthorOwnerLoadPercent') : 1;
+    }
+
+    if (hasCoAuthor && tender.coAuthor === user.name) {
+        return coAuthorLoadShare('coAuthorLoadPercent');
+    }
+
+    return 0;
+}
+
+function userParticipatesInTender(tender, user) {
+    return tenderLoadForUser(tender, user) > 0;
+}
+
+function tenderInvolvesKnownUser(tender, userNamesSet) {
+    return userNamesSet.has(tender.owner) || (tender.coAuthored && userNamesSet.has(tender.coAuthor));
+}
+
+function tenderAssigneeLabel(tender) {
+    return tender.coAuthored && tender.coAuthor
+        ? `${tender.owner} + ${tender.coAuthor}`
+        : tender.owner;
 }
 
 function workloadTone(user) {
@@ -469,7 +519,7 @@ function visibleItems(entity) {
     }
 
     if (entity === 'tenders') {
-        return state.tenders.filter((item) => item.owner === user.name);
+        return state.tenders.filter((item) => userParticipatesInTender(item, user));
     }
 
     if (entity === 'events') {
@@ -512,7 +562,7 @@ function canEdit(entity, item = null) {
         return canCreate(entity);
     }
 
-    return item.owner === user.name || item.person === user.name;
+    return item.owner === user.name || item.coAuthor === user.name || item.person === user.name;
 }
 
 function canDelete() {
@@ -654,6 +704,7 @@ function buildSearchCache() {
             item.client,
             item.lot,
             item.owner,
+            item.coAuthor,
             item.status,
             formatDate(item.deadline),
         ])),
@@ -940,7 +991,7 @@ function renderEconomicOfferAlert(tenders) {
                         <div class="flex flex-wrap items-center justify-between gap-3">
                             <div>
                                 <p class="font-bold text-[#21345d]">${escapeHtml(tender.title)}</p>
-                                <p class="mt-1 text-sm font-semibold text-[#7082a4]">${escapeHtml(tender.owner)} · ${escapeHtml(tender.code)} · ${formatCurrency(tender.budget)}</p>
+                                <p class="mt-1 text-sm font-semibold text-[#7082a4]">${escapeHtml(tenderAssigneeLabel(tender))} · ${escapeHtml(tender.code)} · ${formatCurrency(tender.budget)}</p>
                             </div>
                             <div class="flex gap-2">
                                 <button class="link-action" type="button" data-action="view" data-entity="tenders" data-id="${tender.id}">Ver</button>
@@ -971,7 +1022,7 @@ function renderWorkloadPanel() {
                     <div>
                         <div class="flex items-center justify-between gap-3 text-sm font-semibold">
                             <span>${escapeHtml(user.name)}</span>
-                            <span class="${workload > 100 ? 'text-rose-700' : 'text-[#53658b]'}">${workload}% · ${count} licitaciones</span>
+                            <span class="${workload > 100 ? 'text-rose-700' : 'text-[#53658b]'}">${formatLoadValue(workload)}% · ${formatLoadValue(count)} licitaciones</span>
                         </div>
                         <div class="mt-2 h-2 rounded-full bg-[#eceff7]">
                             <div class="h-full rounded-full ${workloadTone(user)}" style="width:${Math.min(workload, 100)}%"></div>
@@ -1068,12 +1119,12 @@ function tenderSortValue(item, column) {
 
 function tableFor(entity, items, compact = false) {
     const columns = {
-        tenders: ['code', 'title', 'lot', 'client', 'deadline', 'budget', 'economicOffer', 'status', 'owner'],
+        tenders: ['code', 'title', 'lot', 'client', 'deadline', 'budget', 'economicOffer', 'status', 'owner', 'coAuthor'],
         team: ['name', 'username', 'role', 'email', 'workload', 'status', 'passwordResetAt'],
     }[entity];
 
     const labels = {
-        title: 'Objeto', client: 'Organismo', code: 'Expediente', lot: 'Lote', deadline: 'Fin aceptacion ofertas', budget: 'PBL', economicOffer: 'Oferta economica', status: 'Estado', owner: 'Responsable',
+        title: 'Objeto', client: 'Organismo', code: 'Expediente', lot: 'Lote', deadline: 'Fin aceptacion ofertas', budget: 'PBL', economicOffer: 'Oferta economica', status: 'Estado', owner: 'Responsable', coAuthor: 'Coautor',
         name: 'Nombre', type: 'Tipo', updated: 'Actualizado',
         email: 'Email', username: 'Usuario', workload: 'Carga', passwordResetAt: 'Password',
     };
@@ -1166,7 +1217,7 @@ function cellFor(column, value, item = null) {
     if (column === 'workload') {
         const workload = workloadForUser(item);
 
-        return `<td><div class="flex items-center gap-3"><div class="h-2 w-24 rounded-full bg-[#eceff7]"><div class="h-full rounded-full ${workloadTone(item)}" style="width:${Math.min(workload, 100)}%"></div></div><span class="${workload > 100 ? 'text-rose-700' : ''}">${workload}%</span></div></td>`;
+        return `<td><div class="flex items-center gap-3"><div class="h-2 w-24 rounded-full bg-[#eceff7]"><div class="h-full rounded-full ${workloadTone(item)}" style="width:${Math.min(workload, 100)}%"></div></div><span class="${workload > 100 ? 'text-rose-700' : ''}">${formatLoadValue(workload)}%</span></div></td>`;
     }
 
     if (column === 'passwordResetAt') {
@@ -1278,7 +1329,7 @@ function renderNotifications() {
                             <div class="flex flex-wrap items-center justify-between gap-3">
                                 <div>
                                     <p>${escapeHtml(tender.title)}</p>
-                                    <p class="mt-1 text-sm text-amber-700">${escapeHtml(tender.owner)} · ${escapeHtml(tender.code)} · ${formatCurrency(tender.budget)}</p>
+                                    <p class="mt-1 text-sm text-amber-700">${escapeHtml(tenderAssigneeLabel(tender))} · ${escapeHtml(tender.code)} · ${formatCurrency(tender.budget)}</p>
                                 </div>
                                 <div class="flex gap-2">
                                     <button class="link-action" type="button" data-action="view" data-entity="tenders" data-id="${tender.id}">Ver</button>
@@ -1295,13 +1346,24 @@ function renderNotifications() {
 }
 
 function eventList() {
+    const events = filtered(visibleItems('events')).sort((first, second) => {
+        const firstDate = parseDate(first.date)?.getTime() ?? Number.MAX_SAFE_INTEGER;
+        const secondDate = parseDate(second.date)?.getTime() ?? Number.MAX_SAFE_INTEGER;
+
+        if (firstDate !== secondDate) {
+            return firstDate - secondDate;
+        }
+
+        return first.title.localeCompare(second.title);
+    });
+
     return `
         <div class="flex items-center justify-between">
             <h2 class="text-lg font-bold">Hitos</h2>
             ${canCreate('events') ? '<button class="btn-secondary" type="button" data-action="new" data-entity="events">Nuevo hito</button>' : ''}
         </div>
         <div class="mt-5 space-y-3">
-            ${filtered(visibleItems('events')).map((event) => `
+            ${events.map((event) => `
                 <article class="rounded-lg border border-[#e7edf6] p-4">
                     <div class="flex items-start justify-between gap-4">
                         <div>
@@ -1393,7 +1455,7 @@ function renderGantt() {
     const users = state.team.filter((member) => member.role === 'user' && member.status === 'Activo');
     const userNamesSet = new Set(users.map((user) => user.name));
     const tenders = visibleItems('tenders')
-        .filter((tender) => userNamesSet.has(tender.owner))
+        .filter((tender) => tenderInvolvesKnownUser(tender, userNamesSet))
         .filter((tender) => tender.status === 'En preparacion')
         .filter((tender) => parseDate(tender.deadline) >= start)
         .sort((first, second) => first.deadline.localeCompare(second.deadline));
@@ -1425,12 +1487,13 @@ function renderGantt() {
 function ganttTenderRow(tender, days) {
     const deadline = parseDate(tender.deadline);
     const workStart = ganttTenderWorkStart(tender);
-    const loadColor = workloadForUser(state.team.find((user) => user.name === tender.owner)) > 100 ? 'gantt-bar-danger' : 'gantt-bar';
+    const assignees = state.team.filter((user) => userParticipatesInTender(tender, user));
+    const loadColor = assignees.some((user) => workloadForUser(user) > 100) ? 'gantt-bar-danger' : 'gantt-bar';
 
     return `
         <div class="gantt-grid">
             <div class="gantt-sticky gantt-cell font-bold">${escapeHtml(tender.code)} ${escapeHtml(tender.title)}</div>
-            <div class="gantt-sticky-2 gantt-cell">${escapeHtml(tender.owner)}</div>
+            <div class="gantt-sticky-2 gantt-cell">${escapeHtml(tenderAssigneeLabel(tender))}</div>
             <div class="gantt-sticky-3 gantt-cell">Preparacion / presentacion</div>
             ${days.map((day) => {
                 const isDeadline = sameDate(day, deadline);
@@ -1454,14 +1517,20 @@ function ganttUserLoadRow(user, days) {
                 const count = ganttLoadForUserOn(user, day);
                 const tone = count > 3 ? 'gantt-load-over' : count === 3 ? 'gantt-load-high' : count > 0 ? 'gantt-load-ok' : '';
 
-                return `<div class="gantt-load-cell ${tone}">${count || ''}</div>`;
+                return `<div class="gantt-load-cell ${tone}">${count ? formatLoadValue(count) : ''}</div>`;
             }).join('')}
         </div>
     `;
 }
 
 function ganttLoadForUserOn(user, day) {
-    return visibleItems('tenders').filter((tender) => tender.owner === user.name && ganttTenderActiveOn(tender, day)).length;
+    return visibleItems('tenders').reduce((load, tender) => {
+        if (!ganttTenderActiveOn(tender, day)) {
+            return load;
+        }
+
+        return load + tenderLoadForUser(tender, user);
+    }, 0);
 }
 
 function ganttTenderActiveOn(tender, day) {
@@ -1496,7 +1565,7 @@ function renderExecutiveReport() {
                     <div>
                         <h3 class="text-sm font-bold text-[#21345d]">Presentaciones realizadas hoy</h3>
                         <div class="mt-3 space-y-2">
-                            ${report.presentations.map((tender) => reportItem(`${tender.title}`, `${tender.owner} · ${tender.code} · ${formatDate(tenderPresentationDate(tender))} · ${formatEconomicOffer(tender)}`)).join('') || emptyReportItem('Sin presentaciones registradas hoy.')}
+                            ${report.presentations.map((tender) => reportItem(`${tender.title}`, `${tenderAssigneeLabel(tender)} · ${tender.code} · ${formatDate(tenderPresentationDate(tender))} · ${formatEconomicOffer(tender)}`)).join('') || emptyReportItem('Sin presentaciones registradas hoy.')}
                         </div>
                     </div>
                     <div>
@@ -1586,10 +1655,10 @@ function tenderPresentationDate(tender) {
 
 function executiveReportText(report) {
     const presentationLines = report.presentations.length
-        ? report.presentations.map((tender) => `- ${tender.title}: presentada por ${tender.owner}. Fecha registrada: ${formatDate(tenderPresentationDate(tender))}. Oferta economica: ${formatEconomicOffer(tender)}.`).join('\n')
+        ? report.presentations.map((tender) => `- ${tender.title}: presentada por ${tenderAssigneeLabel(tender)}. Fecha registrada: ${formatDate(tenderPresentationDate(tender))}. Oferta economica: ${formatEconomicOffer(tender)}.`).join('\n')
         : '- No se han registrado presentaciones hoy.';
     const awardLines = report.awards.length
-        ? report.awards.map((tender) => `- ${tender.title} (${tender.client}): ${tender.status}. Importe: ${formatCurrency(tender.budget)}. Responsable: ${tender.owner}.`).join('\n')
+        ? report.awards.map((tender) => `- ${tender.title} (${tender.client}): ${tender.status}. Importe: ${formatCurrency(tender.budget)}. Responsable: ${tenderAssigneeLabel(tender)}.`).join('\n')
         : '- No se han recibido adjudicaciones hoy.';
     const preparationOtherLines = report.completedPreparationOthers.length
         ? report.completedPreparationOthers.map((event) => `- ${event.tender}: ${event.title}. Responsable: ${event.owner}. Recepcion: ${formatDate(event.receptionDate)}.`).join('\n')
@@ -2126,7 +2195,7 @@ function renderAdmin() {
             <section class="panel mb-6 border-rose-200 bg-rose-50">
                 <h2 class="text-lg font-bold text-rose-800">Alertas de carga</h2>
                 <div class="mt-3 grid gap-2 text-sm font-semibold text-rose-700">
-                    ${alerts.map((member) => `<p>${escapeHtml(member.name)} esta al ${workloadForUser(member)}% con ${tenderCountForUser(member)} licitaciones activas en la ventana Gantt de hoy.</p>`).join('')}
+                    ${alerts.map((member) => `<p>${escapeHtml(member.name)} esta al ${formatLoadValue(workloadForUser(member))}% con ${formatLoadValue(tenderCountForUser(member))} licitaciones activas en la ventana Gantt de hoy.</p>`).join('')}
                 </div>
             </section>
         ` : ''}
@@ -2159,7 +2228,7 @@ function renderAdmin() {
                         <div class="flex flex-wrap items-center justify-between gap-3 py-4">
                             <div>
                                 <p class="font-bold">${escapeHtml(member.name)}</p>
-                                <p class="text-sm text-[#7082a4]">${escapeHtml(member.username)} · ${escapeHtml(member.email)} · ${escapeHtml(member.role)} · carga ${workloadForUser(member)}%</p>
+                                <p class="text-sm text-[#7082a4]">${escapeHtml(member.username)} · ${escapeHtml(member.email)} · ${escapeHtml(member.role)} · carga ${formatLoadValue(workloadForUser(member))}%</p>
                                 <p class="mt-1 text-xs font-bold text-[#7082a4]">${member.passwordResetAt ? `Ultimo reset: ${formatDate(member.passwordResetAt.slice(0, 10))}` : 'Sin reset registrado'}</p>
                             </div>
                             <div class="flex flex-wrap gap-2">
@@ -2270,7 +2339,7 @@ function renderUserStatsBody() {
 }
 
 function userStatsCard(user) {
-    const tenders = visibleItems('tenders').filter((tender) => tender.owner === user.name);
+    const tenders = visibleItems('tenders').filter((tender) => userParticipatesInTender(tender, user));
     const countedTenders = tenders.filter((tender) => !['Descartada', 'Desistida'].includes(tender.status));
     const analysis = tenders.filter((tender) => tender.status === 'En analisis');
     const prepared = tenders.filter((tender) => tender.status === 'En preparacion');
@@ -2291,9 +2360,9 @@ function userStatsCard(user) {
             <div class="flex flex-wrap items-start justify-between gap-3">
                 <div>
                     <p class="text-base font-bold">${escapeHtml(user.name)}</p>
-                    <p class="mt-1 text-sm font-semibold text-[#7082a4]">${escapeHtml(user.username)} · carga ${workload}%</p>
+                    <p class="mt-1 text-sm font-semibold text-[#7082a4]">${escapeHtml(user.username)} · carga ${formatLoadValue(workload)}%</p>
                 </div>
-                <span class="status-pill ${workload > 100 ? 'status-rose' : 'status-blue'}">${workload}%</span>
+                <span class="status-pill ${workload > 100 ? 'status-rose' : 'status-blue'}">${formatLoadValue(workload)}%</span>
             </div>
             <div class="mt-4 h-2 rounded-full bg-[#eceff7]">
                 <div class="h-full rounded-full ${workloadTone(user)}" style="width:${Math.min(workload, 100)}%"></div>
@@ -2396,15 +2465,15 @@ function openView(entity, id) {
 
 function viewEntriesFor(entity, item) {
     if (entity === 'team') {
-        const tenders = visibleItems('tenders').filter((tender) => tender.owner === item.name);
+        const tenders = visibleItems('tenders').filter((tender) => userParticipatesInTender(tender, item));
         const evaluated = tenders.filter((tender) => tender.status === 'En evaluacion');
         const entries = [
             ['name', item.name],
             ['username', item.username],
             ['role', item.role],
             ['email', item.email],
-            ['workload', `${workloadForUser(item)}%`],
-            ['activeTenders', tenderCountForUser(item)],
+            ['workload', `${formatLoadValue(workloadForUser(item))}%`],
+            ['activeTenders', formatLoadValue(tenderCountForUser(item))],
             ['economicOfferTotal', economicOfferTotal(evaluatedTendersWithEconomicOffer(tenders))],
             ['missingEconomicOffers', missingEconomicOfferCount(evaluated)],
             ['status', item.status],
@@ -2430,6 +2499,8 @@ function viewEntriesFor(entity, item) {
             ['economicOffer', item.economicOffer],
             ['economicOfferWaived', item.economicOfferWaived],
             ['owner', item.owner],
+            ['coAuthored', item.coAuthored],
+            ['coAuthor', item.coAuthor],
             ['presentedAt', item.presentedAt],
             ['adjudicationDate', item.adjudicationDate],
             ['description', item.description],
@@ -2451,6 +2522,8 @@ function viewLabelFor(key) {
         economicOffer: 'Oferta economica',
         economicOfferWaived: 'Oferta economica nula',
         economicOfferTotal: 'Oferta economica acumulada',
+        coAuthored: 'Coautoria',
+        coAuthor: 'Responsable coautor',
         lot: 'Lote',
         missingEconomicOffers: 'Ofertas economicas pendientes',
         owner: 'Responsable',
@@ -2510,6 +2583,7 @@ function openForm(entity, id = null, preset = {}) {
 
     if (entity === 'tenders') {
         syncEconomicOfferWaivedControl(modalBody.querySelector('[data-form]'));
+        syncCoAuthorControl(modalBody.querySelector('[data-form]'));
     }
 
     showModal();
@@ -2523,7 +2597,7 @@ function schemaFor(entity) {
             return [name, label, 'select', activeTenderOptions()];
         }
 
-        if (['owner', 'person'].includes(name)) {
+        if (['owner', 'person', 'coAuthor'].includes(name)) {
             return [name, label, 'select', userNames()];
         }
 
@@ -2536,7 +2610,7 @@ function isFieldRequired(entity, name, isNew = true) {
         return false;
     }
 
-    return !['adjudicationDate', 'description', 'economicOffer'].includes(name);
+    return !['adjudicationDate', 'description', 'economicOffer', 'coAuthor'].includes(name);
 }
 
 function requiredAttribute(isRequired) {
@@ -2545,17 +2619,20 @@ function requiredAttribute(isRequired) {
 
 function fieldMarkup(name, label, type, options, value, isRequired = true) {
     if (type === 'select') {
+        const coAuthorFieldAttribute = name === 'coAuthor' ? ' data-coauthor-field' : '';
+        const coAuthorSelectAttribute = name === 'coAuthor' ? ' data-coauthor-select' : '';
+        const coAuthorFieldClass = name === 'coAuthor' && !value ? ' hidden' : '';
         const fieldOptions = [
             ...(!isRequired && !value ? [''] : []),
             ...(value && !options.includes(value) ? [value] : []),
             ...options,
         ];
 
-        return `<label class="field-label">${label}<select class="field-control" name="${name}"${requiredAttribute(isRequired)}>${fieldOptions.map((option) => `<option value="${escapeHtml(option)}" ${option === value ? 'selected' : ''}>${escapeHtml(option)}</option>`).join('')}</select></label>`;
+        return `<label class="field-label${coAuthorFieldClass}"${coAuthorFieldAttribute}>${label}<select class="field-control" name="${name}"${coAuthorSelectAttribute}${requiredAttribute(isRequired)}>${fieldOptions.map((option) => `<option value="${escapeHtml(option)}" ${option === value ? 'selected' : ''}>${escapeHtml(option)}</option>`).join('')}</select></label>`;
     }
 
     if (type === 'checkbox') {
-        const dataAttribute = name === 'preparationOther' ? ' data-preparation-other' : name === 'economicOfferWaived' ? ' data-economic-offer-waived' : '';
+        const dataAttribute = name === 'preparationOther' ? ' data-preparation-other' : name === 'economicOfferWaived' ? ' data-economic-offer-waived' : name === 'coAuthored' ? ' data-coauthored' : '';
 
         return `<label class="flex items-center gap-3 rounded-lg border border-[#dfe6f2] p-4 text-sm font-bold text-[#21345d]"><input type="checkbox" name="${name}"${dataAttribute} ${value ? 'checked' : ''}> ${label}</label>`;
     }
@@ -2576,6 +2653,10 @@ function fieldMarkup(name, label, type, options, value, isRequired = true) {
         const dataAttribute = name === 'economicOffer' ? ' data-economic-offer-input' : '';
 
         return `<label class="field-label">${label}<input class="field-control" type="number" name="${name}" value="${escapeHtml(value)}" min="0" step="0.01" inputmode="decimal"${dataAttribute}${requiredAttribute(isRequired)}></label>`;
+    }
+
+    if (type === 'percentage') {
+        return `<label class="field-label">${label}<input class="field-control" type="number" name="${name}" value="${escapeHtml(value)}" min="0" max="100" step="1" inputmode="numeric"${requiredAttribute(isRequired)}></label>`;
     }
 
     return `<label class="field-label">${label}<input class="field-control" type="${type}" name="${name}" value="${escapeHtml(value)}"${requiredAttribute(isRequired)}></label>`;
@@ -2671,6 +2752,8 @@ function prepareFormData(entity, data, existingItem = null) {
     if (entity === 'tenders') {
         data.economicOfferWaived = data.economicOfferWaived === 'on';
         data.economicOffer = data.economicOfferWaived ? '' : (data.economicOffer ?? existingItem?.economicOffer ?? '');
+        data.coAuthored = data.coAuthored === 'on';
+        data.coAuthor = data.coAuthored ? (data.coAuthor ?? existingItem?.coAuthor ?? '') : '';
         data.presentedAt = data.status === 'En evaluacion' && existingItem?.status !== 'En evaluacion'
             ? new Date().toISOString()
             : existingItem?.presentedAt || '';
@@ -2755,6 +2838,18 @@ function validateFormData(entity, data, id = '') {
         return false;
     }
 
+    if (entity === 'tenders' && data.coAuthored) {
+        if (!data.coAuthor || !allUserNames.includes(data.coAuthor)) {
+            alert('Selecciona un responsable coautor que exista en usuarios.');
+            return false;
+        }
+
+        if (data.owner === data.coAuthor) {
+            alert('El responsable coautor debe ser distinto del responsable principal.');
+            return false;
+        }
+    }
+
     if (entity === 'events' && !allUserNames.includes(data.owner)) {
         alert('Selecciona un responsable que exista en usuarios.');
         return false;
@@ -2775,6 +2870,20 @@ function validateFormData(entity, data, id = '') {
         }
 
         data.username = username;
+    }
+
+    if (entity === 'settings') {
+        const coAuthorLoadFields = ['coAuthorOwnerLoadPercent', 'coAuthorLoadPercent'];
+        const hasInvalidLoadPercent = coAuthorLoadFields.some((field) => {
+            const percent = Number(data[field]);
+
+            return !Number.isInteger(percent) || percent < 0 || percent > 100;
+        });
+
+        if (hasInvalidLoadPercent) {
+            alert('Los porcentajes de carga de coautoria deben ser numeros enteros entre 0 y 100.');
+            return false;
+        }
     }
 
     return true;
@@ -2878,6 +2987,23 @@ function syncEconomicOfferWaivedControl(form) {
 
     if (checkbox.checked) {
         input.value = '';
+    }
+}
+
+function syncCoAuthorControl(form) {
+    const checkbox = form?.querySelector('[data-coauthored]');
+    const field = form?.querySelector('[data-coauthor-field]');
+    const select = form?.querySelector('[data-coauthor-select]');
+
+    if (!checkbox || !field || !select) {
+        return;
+    }
+
+    field.classList.toggle('hidden', !checkbox.checked);
+    select.disabled = !checkbox.checked;
+
+    if (!checkbox.checked) {
+        select.value = '';
     }
 }
 
@@ -3124,6 +3250,10 @@ document.addEventListener('change', (event) => {
 
     if (event.target.matches('[data-economic-offer-waived]')) {
         syncEconomicOfferWaivedControl(event.target.closest('form'));
+    }
+
+    if (event.target.matches('[data-coauthored]')) {
+        syncCoAuthorControl(event.target.closest('form'));
     }
 
     if (event.target.matches('[data-mobile-nav]')) {
