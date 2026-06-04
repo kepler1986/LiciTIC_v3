@@ -74,7 +74,7 @@
                             <button class="btn-secondary hidden sm:inline-flex" type="button" data-logout>Salir</button>
                             <button class="inline-flex h-12 items-center gap-3 rounded-lg bg-blue-700 px-5 text-sm font-bold text-white shadow-lg shadow-blue-700/20" type="button" data-primary-action>
                                 <svg class="size-5"><use href="#icon-plus"/></svg>
-                                <span class="hidden sm:inline">Anadir</span>
+                                <span class="hidden sm:inline">Añadir</span>
                             </button>
                         </div>
                     </div>

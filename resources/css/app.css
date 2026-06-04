@@ -37,6 +37,10 @@
         @apply inline-flex h-10 items-center justify-center rounded-lg border border-[#dfe6f2] bg-white px-4 text-sm font-bold text-[#21345d] hover:bg-[#f2f5fb];
     }
 
+    .btn-danger {
+        @apply inline-flex h-10 items-center justify-center rounded-lg bg-rose-600 px-4 text-sm font-bold text-white shadow-lg shadow-rose-600/15 hover:bg-rose-700;
+    }
+
     .link-action {
         @apply mr-3 text-sm font-bold text-blue-700 hover:text-blue-900;
     }

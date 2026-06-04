@@ -105,19 +105,22 @@ const shellMarkup = app.innerHTML;
 const memoryStorage = {};
 let currentSection = 'inicio';
 let query = '';
-let state = loadState();
-let auth = loadAuth();
+let state = { tenders: [], events: [], team: [], settings: {}, stats: {} };
+let auth = null;
 let importPreview = [];
 let importRaw = '';
 let importWarnings = [];
 let selectedImportIndexes = new Set();
-let searchCache = [];
+let searchResultsData = { tenders: [], events: [], team: [] };
 let searchResultsQuery = '';
 let activeSearchTab = 'tenders';
 let calendarCursor = startOfMonth(today());
 let tenderSort = { column: 'deadline', direction: 'asc' };
 let tenderColumnFilters = {};
 let pendingTenderFilterFocus = null;
+let tenderPage = 1;
+const tenderPerPage = 50;
+let tenderPageMeta = { total: 0, lastPage: 1, currentPage: 1 };
 
 function bindElements() {
     app = document.querySelector('[data-app]');
@@ -155,66 +158,76 @@ function storageRemove(key) {
     } catch {}
 }
 
-function loadState() {
-    const stored = storageGet('bidsuite-state');
+// ---------- Capa de datos (API REST) ----------
+// La BD MySQL es la fuente de verdad. El cliente pide a cada vista solo lo que
+// necesita (pagina, rango, agregados). state.team/settings/stats se cargan una
+// vez (son pequenos); state.tenders/events guardan SOLO el subconjunto de la
+// vista actual; `view` cachea los payloads de metricas/paginacion.
+const api = {
+    async request(method, path, { params, body } = {}) {
+        const url = new URL(path, window.location.origin);
 
-    if (!stored) {
-        return normalizeState(structuredClone(defaults));
+        if (params) {
+            Object.entries(params).forEach(([key, value]) => {
+                if (value !== undefined && value !== null && value !== '') {
+                    url.searchParams.set(key, value);
+                }
+            });
+        }
+
+        const options = { method, headers: { Accept: 'application/json' } };
+
+        if (body !== undefined) {
+            options.headers['Content-Type'] = 'application/json';
+            options.body = JSON.stringify(body);
+        }
+
+        return fetch(url, options);
+    },
+    async get(path, params) {
+        const response = await this.request('GET', path, { params });
+
+        if (!response.ok) {
+            throw new Error(`GET ${path} -> ${response.status}`);
+        }
+
+        return response.json();
+    },
+    async mutate(method, path, body, params) {
+        const response = await this.request(method, path, { body, params });
+
+        if (response.status === 409) {
+            const data = await response.json().catch(() => ({}));
+            const error = new Error('conflict');
+            error.conflict = true;
+            error.data = data;
+            throw error;
+        }
+
+        if (!response.ok) {
+            const data = await response.json().catch(() => ({}));
+            const error = new Error(data.message || `${method} ${path} -> ${response.status}`);
+            error.data = data;
+            throw error;
+        }
+
+        return response.status === 204 ? null : response.json();
+    },
+};
+
+// Parametros de scoping: el servidor acota por usuario cuando no es admin.
+function scopeParams(extra = {}) {
+    const user = currentUser();
+    const params = { isAdmin: isAdmin() ? 1 : 0, viewer: user?.name ?? '', ...extra };
+
+    if (!isAdmin() && user) {
+        params.scope = user.name;
     }
 
-    const parsed = JSON.parse(stored);
-
-    return normalizeState({
-        ...structuredClone(defaults),
-        ...parsed,
-        settings: {
-            ...defaults.settings,
-            ...(parsed.settings ?? {}),
-            statusColors: {
-                ...defaults.settings.statusColors,
-                ...(parsed.settings?.statusColors ?? {}),
-            },
-        },
-        stats: { ...defaults.stats, ...(parsed.stats ?? {}) },
-    });
+    return params;
 }
 
-function normalizeState(nextState) {
-    const defaultUsersById = Object.fromEntries(defaults.team.map((member) => [member.id, member]));
-    const statusMap = {
-        'En curso': 'En preparacion',
-        Entrega: 'En evaluacion',
-        'En revision': 'En evaluacion',
-        Pendiente: 'En analisis',
-        Perdida: 'Perdida',
-    };
-
-    nextState.team = nextState.team.map((member, index) => {
-        const fallback = defaultUsersById[member.id] ?? {};
-        const normalizedRole = ['admin', 'user'].includes(member.role) ? member.role : (index === 0 ? 'admin' : 'user');
-
-        return {
-            ...fallback,
-            ...member,
-            username: member.username || fallback.username || member.email?.split('@')[0] || `user${index + 1}`,
-            role: normalizedRole,
-            password: member.password || fallback.password || '1234',
-        };
-    });
-    nextState.tenders = nextState.tenders.map((tender) => ({
-        ...tender,
-        lot: tender.lot ?? '',
-        deadline: tender.deadline?.includes('T') ? tender.deadline : `${tender.deadline}T14:00`,
-        status: statusMap[tender.status] ?? tender.status,
-        economicOffer: tender.economicOffer ?? '',
-        economicOfferWaived: Boolean(tender.economicOfferWaived),
-        coAuthored: Boolean(tender.coAuthored && tender.coAuthor),
-        coAuthor: tender.coAuthored ? (tender.coAuthor ?? '') : '',
-        presentedAt: tender.presentedAt || ((statusMap[tender.status] ?? tender.status) === 'En evaluacion' ? (tender.deadline || '') : ''),
-    }));
-
-    return nextState;
-}
+const view = {};
 
 function loadAuth() {
     const stored = storageGet('bidsuite-auth');
@@ -234,8 +247,30 @@ function loadAuth() {
     }
 }
 
-function saveState() {
-    storageSet('bidsuite-state', JSON.stringify(state));
+// Carga inicial de los datos pequenos y compartidos (equipo + parametros).
+async function loadGlobals() {
+    const [members, settings] = await Promise.all([
+        api.get('/api/members'),
+        api.get('/api/settings'),
+    ]);
+
+    state.team = members.data ?? [];
+    state.settings = settings.settings ?? {};
+    state.stats = settings.stats ?? {};
+}
+
+// Refresca el equipo/parametros tras una mutacion que los afecte.
+async function refreshGlobals() {
+    await loadGlobals();
+}
+
+// Maneja un conflicto de bloqueo optimista (409): avisa y recarga la vista.
+function handleMutationError(error) {
+    if (error?.conflict) {
+        alert('Otro usuario modifico este registro mientras lo editabas. Se recargaran los datos.');
+    } else {
+        alert(error?.message || 'No se pudo completar la operacion. Reintenta.');
+    }
 }
 
 function currentUser() {
@@ -408,6 +443,13 @@ function tenderCountForUser(user) {
 }
 
 function workloadForUser(user) {
+    // Carga "actual" del usuario: la calcula el servidor (workloadMap) para
+    // dashboard/estadisticas/equipo; en Gantt cae al calculo local sobre el
+    // subconjunto ya cargado.
+    if (user && Object.prototype.hasOwnProperty.call(workloadMap, user.name)) {
+        return workloadMap[user.name];
+    }
+
     return Math.round(tenderCountForUser(user) * 33 * 100) / 100;
 }
 
@@ -507,40 +549,18 @@ function overloadedUsers() {
     return state.team.filter((member) => workloadForUser(member) > 100);
 }
 
+// El servidor ya devuelve los datos acotados al usuario; aqui solo se exponen
+// los subconjuntos ya cargados para la vista actual.
 function visibleItems(entity) {
-    if (isAdmin()) {
-        return entity === 'events' ? visibleEvents() : state[entity];
-    }
-
-    const user = currentUser();
-
-    if (!user) {
-        return [];
-    }
-
-    if (entity === 'tenders') {
-        return state.tenders.filter((item) => userParticipatesInTender(item, user));
-    }
-
-    if (entity === 'events') {
-        return visibleEvents().filter((item) => item.owner === user.name);
-    }
-
     if (entity === 'team') {
-        return [user];
+        return isAdmin() ? state.team : [currentUser()].filter(Boolean);
     }
 
-    return state[entity];
+    return state[entity] ?? [];
 }
 
 function visibleEvents() {
-    return state.events.filter((event) => {
-        if (!event.autoGenerated) {
-            return true;
-        }
-
-        return tenderByTitle(event.tender)?.status === 'En preparacion';
-    });
+    return state.events ?? [];
 }
 
 function canCreate(entity) {
@@ -737,61 +757,39 @@ function searchRecord(entity, item, title, parts) {
     };
 }
 
-function globalSearchResults(term = searchTerm()) {
-    if (!term) {
-        return { tenders: [], events: [], team: [] };
-    }
-
-    const results = { tenders: [], events: [], team: [] };
-
-    searchCache
-        .filter((record) => record.text.includes(term))
-        .forEach((record) => results[record.entity].push(record));
-
-    return results;
+// Los resultados de busqueda los provee el servidor (LIKE/FULLTEXT sobre 30k).
+function globalSearchResults() {
+    return searchResultsData;
 }
 
+// Convierte un registro plano del servidor en el "record" que pintan las tarjetas.
+function searchRecordFor(entity, item) {
+    let title = '';
+    let parts = [];
+
+    if (entity === 'tenders') {
+        title = item.title;
+        parts = [item.code, item.client, item.owner, item.status];
+    } else if (entity === 'events') {
+        title = item.title;
+        parts = [item.tender, item.type, item.owner, formatDate(item.date)];
+    } else {
+        title = item.name;
+        parts = [item.username, item.email, item.role];
+    }
+
+    return { entity, id: item.id, item, title: title ?? '', subtitle: parts.filter(Boolean).join(' · ') };
+}
+
+// Sin sugerencias en vivo: con 30k registros la busqueda se resuelve en servidor
+// al confirmar (Enter o boton), no en cada pulsacion.
 function renderSearchSuggestions() {
     const suggestions = document.querySelector('[data-search-suggestions]');
 
-    if (!suggestions) {
-        return;
-    }
-
-    const term = searchTerm();
-
-    if (!term || currentSection === 'busqueda') {
+    if (suggestions) {
         suggestions.classList.add('hidden');
         suggestions.innerHTML = '';
-        return;
     }
-
-    const results = Object.values(globalSearchResults(term)).flat().slice(0, 6);
-
-    if (!results.length) {
-        suggestions.classList.remove('hidden');
-        suggestions.innerHTML = '<p class="p-4 text-sm font-semibold text-[#7082a4]">Sin coincidencias.</p>';
-        return;
-    }
-
-    suggestions.classList.remove('hidden');
-    suggestions.innerHTML = `
-        <div class="divide-y divide-[#e7edf6]">
-            ${results.map((record) => `
-                <button class="flex w-full items-start justify-between gap-4 p-4 text-left hover:bg-[#f8fafd]" type="button" data-action="search-open" data-entity="${record.entity}" data-id="${record.id}">
-                    <span class="min-w-0">
-                        <span class="block truncate text-sm font-bold text-[#21345d]">${escapeHtml(record.title)}</span>
-                        <span class="mt-1 block truncate text-xs font-semibold text-[#7082a4]">${escapeHtml(record.subtitle)}</span>
-                    </span>
-                    <span class="status-pill status-slate shrink-0">${searchEntityLabel(record.entity)}</span>
-                </button>
-            `).join('')}
-        </div>
-        <button class="flex w-full items-center justify-between gap-3 bg-[#f8fafd] p-4 text-sm font-bold text-blue-700" type="button" data-action="search-submit">
-            <span>Ver resultados de busqueda</span>
-            <span>${results.length} sugerencias</span>
-        </button>
-    `;
 }
 
 function searchEntityLabel(entity) {
@@ -802,15 +800,25 @@ function searchEntityLabel(entity) {
     }[entity] ?? '';
 }
 
-function submitGlobalSearch(displayQuery = query) {
-    searchResultsQuery = displayQuery.trim();
+async function submitGlobalSearch(displayQuery = query) {
+    searchResultsQuery = (displayQuery ?? '').trim();
 
     if (!searchResultsQuery) {
         return;
     }
 
-    const results = globalSearchResults(normalizeSearchText(searchResultsQuery));
-    activeSearchTab = ['tenders', 'events', 'team'].find((tab) => results[tab].length) ?? 'tenders';
+    try {
+        const data = await api.get('/api/search', scopeParams({ q: searchResultsQuery }));
+        searchResultsData = {
+            tenders: (data.tenders ?? []).map((item) => searchRecordFor('tenders', item)),
+            events: (data.events ?? []).map((item) => searchRecordFor('events', item)),
+            team: (data.team ?? []).map((item) => searchRecordFor('team', item)),
+        };
+    } catch {
+        searchResultsData = { tenders: [], events: [], team: [] };
+    }
+
+    activeSearchTab = ['tenders', 'events', 'team'].find((tab) => searchResultsData[tab].length) ?? 'tenders';
     setSection('busqueda');
 }
 
@@ -838,18 +846,39 @@ function renderChrome() {
     document.querySelector('[data-notification-count]').textContent = notificationCount();
 }
 
-function render() {
+let renderToken = 0;
+
+async function render() {
     if (!auth || !currentUser()) {
         renderLogin();
         return;
     }
 
     applySettings();
-    searchCache = buildSearchCache();
-    renderChrome();
     if (!isAdmin() && ['admin', 'equipo', 'importar'].includes(currentSection)) {
         currentSection = 'inicio';
     }
+    renderChrome();
+
+    const token = ++renderToken;
+    const sectionAtStart = currentSection;
+
+    try {
+        await loadSectionData(currentSection);
+    } catch (error) {
+        if (token !== renderToken) {
+            return;
+        }
+        content.innerHTML = '<section class="panel"><p class="text-sm font-semibold text-rose-600">No se pudieron cargar los datos del servidor. Comprueba la conexion y reintenta.</p></section>';
+        return;
+    }
+
+    // Si el usuario cambio de seccion mientras cargaba, descartamos este render.
+    if (token !== renderToken || sectionAtStart !== currentSection) {
+        return;
+    }
+
+    renderChrome();
 
     const title = sections.find((item) => item.id === currentSection)?.label ?? 'Inicio';
     const renderers = {
@@ -877,7 +906,110 @@ function render() {
         ${renderers[currentSection]()}
     `;
     restoreTenderFilterFocus();
-    renderSearchSuggestions();
+}
+
+// Carga del servidor solo lo que la seccion necesita (pagina, rango o agregados).
+async function loadSectionData(section) {
+    if (section === 'inicio') {
+        const [dashboard, overview, monthEvents, deadlineTenders] = await Promise.all([
+            api.get('/api/metrics/dashboard', scopeParams()),
+            api.get('/api/metrics/overview', scopeParams()),
+            api.get('/api/milestones', scopeParams({ month: currentMonthKey() })),
+            api.get('/api/tenders', scopeParams({ status: 'En preparacion', per_page: 100, sort: 'deadline', direction: 'asc' })),
+        ]);
+        view.dashboard = dashboard;
+        view.overview = overview;
+        state.events = monthEvents.data ?? [];
+        state.tenders = deadlineTenders.data ?? [];
+        setWorkloadMap(dashboard.workloadPerUser);
+        return;
+    }
+
+    if (section === 'licitaciones') {
+        const params = scopeParams({
+            page: tenderPage,
+            per_page: tenderPerPage,
+            sort: tenderSort.column,
+            direction: tenderSort.direction,
+        });
+        Object.entries(tenderColumnFilters).forEach(([column, value]) => {
+            if (value) {
+                params[`filters[${column}]`] = value;
+            }
+        });
+        const result = await api.get('/api/tenders', params);
+        state.tenders = result.data ?? [];
+        tenderPageMeta = result.meta ?? { total: 0, lastPage: 1, currentPage: 1 };
+        return;
+    }
+
+    if (section === 'calendario') {
+        const month = dateKey(calendarCursor).slice(0, 7);
+        const [events, tenders] = await Promise.all([
+            api.get('/api/milestones', scopeParams({ month })),
+            // Licitaciones para el selector del formulario de hito (las mas proximas por deadline).
+            api.get('/api/tenders', scopeParams({ per_page: 200, sort: 'deadline', direction: 'desc' })),
+        ]);
+        state.events = events.data ?? [];
+        state.tenders = tenders.data ?? [];
+        return;
+    }
+
+    if (section === 'estadisticas') {
+        view.overview = await api.get('/api/metrics/overview', scopeParams());
+        setWorkloadMapFromOverview(view.overview);
+        return;
+    }
+
+    if (section === 'gantt') {
+        const from = todayIso();
+        const to = dateKey(addDays(today(), 28));
+        const result = await api.get('/api/metrics/gantt', scopeParams({ from, to }));
+        view.gantt = result;
+        state.tenders = result.tenders ?? [];
+        return;
+    }
+
+    if (section === 'informe') {
+        view.report = await api.get('/api/metrics/report', scopeParams({ month: currentMonthKey() }));
+        return;
+    }
+
+    if (section === 'equipo') {
+        const [members, overview] = await Promise.all([
+            api.get('/api/members'),
+            api.get('/api/metrics/overview', scopeParams()),
+        ]);
+        state.team = members.data ?? [];
+        view.overview = overview;
+        setWorkloadMapFromOverview(overview);
+        return;
+    }
+
+    if (section === 'admin') {
+        view.dashboard = await api.get('/api/metrics/dashboard', scopeParams());
+        setWorkloadMap(view.dashboard.workloadPerUser);
+        return;
+    }
+
+    // importar / busqueda no necesitan precarga (usan settings/equipo ya cargados
+    // o cargan bajo demanda en sus propias acciones).
+}
+
+let workloadMap = {};
+
+function setWorkloadMap(workloadPerUser = []) {
+    workloadMap = {};
+    workloadPerUser.forEach((entry) => {
+        workloadMap[entry.name] = entry.load;
+    });
+}
+
+function setWorkloadMapFromOverview(overview) {
+    workloadMap = {};
+    (overview?.userStats ?? []).forEach((entry) => {
+        workloadMap[entry.name] = entry.load;
+    });
 }
 
 function impersonationBanner() {
@@ -925,25 +1057,19 @@ function sectionActions() {
 }
 
 function renderDashboard() {
-    const tenders = visibleItems('tenders');
-    const active = tenders.filter(isTenderActive).length;
-    const activeTrend = activeTenderTrendLabel(tenders);
-    const due = tenders.filter(isUpcomingTenderDue).length;
-    const dueThisWeek = tenders.filter(isTenderDueThisWeek).length;
-    const successRate = successRateFor(tenders);
-    const workload = averageWorkloadFor(workloadAverageUsers());
-    const missingOffers = missingEconomicOfferTenders();
+    const k = view.dashboard?.kpis ?? {};
+    const activeTrend = trendLabel(k.activeTrendPercent ?? 0);
 
     return `
         <section class="dashboard-metrics-frame">
             <div class="dashboard-metrics-row">
-                ${metricCard('Licitaciones activas', active, activeTrend, 'folder', 'blue', trendToneClass(activeTrend))}
-                ${metricCard('Entregas proximas', due, `${dueThisWeek ? `+ ${dueThisWeek}` : '0'} esta semana`, 'calendar', 'teal')}
-                ${metricCard('Tasa de exito', `${successRate}%`, successRateMeta(tenders), 'chart', 'green')}
-                ${metricCard('Carga del equipo', `${workload}%`, 'Media del equipo', 'team', 'violet')}
+                ${metricCard('Licitaciones activas', k.active ?? 0, activeTrend, 'folder', 'blue', trendToneClass(activeTrend))}
+                ${metricCard('Entregas proximas', k.due ?? 0, `${k.dueThisWeek ? `+ ${k.dueThisWeek}` : '0'} esta semana`, 'calendar', 'teal')}
+                ${metricCard('Tasa de exito', `${k.successRate ?? 0}%`, k.successRateMeta ?? 'Sin cerradas', 'chart', 'green')}
+                ${metricCard('Carga del equipo', `${k.workload ?? 0}%`, 'Media del equipo', 'team', 'violet')}
             </div>
         </section>
-        ${renderEconomicOfferAlert(missingOffers)}
+        ${renderEconomicOfferAlert(view.dashboard?.missingOffers ?? [], view.dashboard?.missingOffersTotal ?? 0)}
         <section class="mt-6 grid gap-6 xl:grid-cols-[1.05fr_1fr]">
             <article class="panel">${renderCalendarPreview()}</article>
             <article class="panel">${renderWorkloadPanel()}</article>
@@ -953,6 +1079,12 @@ function renderDashboard() {
             <article class="panel">${renderDeadlineList()}</article>
         </section>
     `;
+}
+
+function trendLabel(percent) {
+    const prefix = percent > 0 ? '+ ' : percent < 0 ? '- ' : '';
+
+    return `${prefix}${Math.abs(percent)}% vs. mes anterior`;
 }
 
 function successRateFor(tenders) {
@@ -971,17 +1103,20 @@ function successRateMeta(tenders) {
     return closed ? `${won} ganadas de ${closed} cerradas` : 'Sin cerradas';
 }
 
-function renderEconomicOfferAlert(tenders) {
+function renderEconomicOfferAlert(tenders, total = null) {
     if (!tenders.length) {
         return '';
     }
+
+    const totalCount = total ?? tenders.length;
+    const extra = totalCount > tenders.length ? ` (mostrando ${tenders.length})` : '';
 
     return `
         <section class="panel mt-6 border-amber-200 bg-amber-50">
             <div class="flex flex-wrap items-center justify-between gap-3">
                 <div>
                     <h2 class="text-lg font-bold text-amber-900">Ofertas economicas pendientes</h2>
-                    <p class="mt-1 text-sm font-semibold text-amber-800">${tenders.length} licitaciones en evaluacion sin oferta economica.</p>
+                    <p class="mt-1 text-sm font-semibold text-amber-800">${totalCount} licitaciones en evaluacion sin oferta economica${extra}.</p>
                 </div>
                 <span class="status-pill status-amber">${isAdmin() ? 'Equipo completo' : 'Mis licitaciones'}</span>
             </div>
@@ -1006,7 +1141,7 @@ function renderEconomicOfferAlert(tenders) {
 }
 
 function renderWorkloadPanel() {
-    const users = isAdmin() ? state.team : [currentUser()];
+    const entries = view.dashboard?.workloadPerUser ?? [];
 
     return `
         <div class="flex items-center justify-between gap-4">
@@ -1014,22 +1149,23 @@ function renderWorkloadPanel() {
             <p class="text-sm font-bold text-[#53658b]">4 dias laborales previos a presentacion</p>
         </div>
         <div class="mt-5 space-y-4">
-            ${users.map((user) => {
-                const workload = workloadForUser(user);
-                const count = tenderCountForUser(user);
+            ${entries.map((entry) => {
+                const workload = entry.load;
+                const count = workload / 33;
+                const tone = workload > 100 ? 'bg-rose-600' : 'bg-violet-600';
 
                 return `
                     <div>
                         <div class="flex items-center justify-between gap-3 text-sm font-semibold">
-                            <span>${escapeHtml(user.name)}</span>
+                            <span>${escapeHtml(entry.name)}</span>
                             <span class="${workload > 100 ? 'text-rose-700' : 'text-[#53658b]'}">${formatLoadValue(workload)}% · ${formatLoadValue(count)} licitaciones</span>
                         </div>
                         <div class="mt-2 h-2 rounded-full bg-[#eceff7]">
-                            <div class="h-full rounded-full ${workloadTone(user)}" style="width:${Math.min(workload, 100)}%"></div>
+                            <div class="h-full rounded-full ${tone}" style="width:${Math.min(workload, 100)}%"></div>
                         </div>
                     </div>
                 `;
-            }).join('')}
+            }).join('') || '<p class="text-sm font-semibold text-[#7082a4]">Sin usuarios.</p>'}
         </div>
     `;
 }
@@ -1054,9 +1190,32 @@ function metricCard(label, value, trend, icon, tone, trendTone = 'text-emerald-6
 }
 
 function renderCollection(entity) {
-    const items = entity === 'tenders' ? tenderTableItems(filtered(visibleItems(entity))) : filtered(visibleItems(entity));
+    if (entity === 'tenders') {
+        // La pagina ya viene ordenada/filtrada/paginada del servidor.
+        return `<section class="panel">${tableFor('tenders', state.tenders)}${renderTenderPagination()}</section>`;
+    }
 
-    return `<section class="panel">${tableFor(entity, items)}</section>`;
+    return `<section class="panel">${tableFor(entity, filtered(visibleItems(entity)))}</section>`;
+}
+
+function renderTenderPagination() {
+    const meta = tenderPageMeta ?? {};
+    const lastPage = meta.lastPage ?? 1;
+    const currentPage = meta.currentPage ?? 1;
+
+    if (lastPage <= 1) {
+        return `<div class="mt-4 text-sm font-semibold text-[#7082a4]">${meta.total ?? state.tenders.length} licitaciones</div>`;
+    }
+
+    return `
+        <div class="mt-4 flex flex-wrap items-center justify-between gap-3">
+            <span class="text-sm font-semibold text-[#7082a4]">${meta.total} licitaciones · pagina ${currentPage} de ${lastPage}</span>
+            <div class="flex gap-2">
+                <button class="btn-secondary" type="button" data-action="tender-page" data-page="${currentPage - 1}" ${currentPage <= 1 ? 'disabled' : ''}>Anterior</button>
+                <button class="btn-secondary" type="button" data-action="tender-page" data-page="${currentPage + 1}" ${currentPage >= lastPage ? 'disabled' : ''}>Siguiente</button>
+            </div>
+        </div>
+    `;
 }
 
 function tenderTableItems(items) {
@@ -1300,12 +1459,12 @@ function upcomingPresentations() {
 }
 
 function notificationCount() {
-    return upcomingPresentations().length + missingEconomicOfferTenders().length;
+    return upcomingPresentations().length + (view.dashboard?.missingOffersTotal ?? 0);
 }
 
 function renderNotifications() {
     const presentations = upcomingPresentations();
-    const missingOffers = missingEconomicOfferTenders();
+    const missingOffers = view.dashboard?.missingOffers ?? [];
 
     modalTitle.textContent = 'Notificaciones';
     modalBody.innerHTML = `
@@ -1610,21 +1769,26 @@ function renderExecutiveReport() {
 }
 
 function executiveReportData() {
-    const currentDate = todayIso();
-    const month = currentMonthKey();
+    const r = view.report ?? {};
+    const month = r.month ?? {};
 
     return {
-        date: currentDate,
-        presentations: visibleItems('tenders')
-            .filter((tender) => tender.status === 'En evaluacion' && tenderPresentationDate(tender)?.startsWith(currentDate))
-            .sort((a, b) => a.title.localeCompare(b.title)),
-        awards: visibleItems('tenders')
-            .filter((tender) => ['Ganada', 'Perdida'].includes(tender.status) && tender.adjudicationDate === currentDate)
-            .sort((a, b) => a.title.localeCompare(b.title)),
-        completedPreparationOthers: visibleItems('events')
-            .filter((event) => event.preparationOther && event.status === 'Completado' && event.completedAt?.startsWith(currentDate))
-            .sort((a, b) => a.tender.localeCompare(b.tender)),
-        month: executiveReportMonthData(month),
+        date: r.date ?? todayIso(),
+        presentations: r.presentationsToday ?? [],
+        awards: r.awardsToday ?? [],
+        completedPreparationOthers: [],
+        month: {
+            label: month.label ?? currentMonthKey(),
+            presentations: month.presentations ?? 0,
+            awards: month.awards ?? 0,
+            completedPreparationOthers: month.completedPreparationOthers ?? 0,
+            evaluationBudget: month.evaluationBudget ?? 0,
+            remainingPreparationBudget: month.remainingPreparationBudget ?? 0,
+            economicOfferTotal: month.economicOfferTotal ?? 0,
+            averageEconomicOffer: month.averageEconomicOffer ?? 0,
+            economicOfferCount: month.economicOfferCount ?? 0,
+            averageWorkload: month.averageWorkload ?? 0,
+        },
     };
 }
 
@@ -1817,7 +1981,7 @@ function clearImportPreview() {
     selectedImportIndexes = new Set();
 }
 
-function previewImportTenders() {
+async function previewImportTenders() {
     const input = document.querySelector('[data-import-input]');
 
     importRaw = input?.value ?? '';
@@ -1830,16 +1994,28 @@ function previewImportTenders() {
         return;
     }
 
+    let parsedRows;
+
     try {
-        importPreview = parseImportedTenders(importRaw);
+        parsedRows = parseImportedTenders(importRaw);
+    } catch (error) {
+        alert(error.message);
+        return;
+    }
+
+    try {
+        // El servidor clasifica create/update comparando contra todas las licitaciones.
+        const result = await api.mutate('POST', '/api/tenders/import/preview', { rows: parsedRows });
+        importPreview = result.rows ?? [];
+        importWarnings = result.warnings ?? [];
         selectAllImportPreview();
         render();
     } catch (error) {
-        alert(error.message);
+        handleMutationError(error);
     }
 }
 
-function commitImportTenders() {
+async function commitImportTenders() {
     if (!importPreview.length) {
         return;
     }
@@ -1851,27 +2027,18 @@ function commitImportTenders() {
         return;
     }
 
-    const importedAt = Date.now();
-    selectedTenders.forEach((tender, index) => {
-        const { importAction, importUpdateId, newUser, ...tenderData } = tender;
-
-        if (importAction === 'updateTender' && importUpdateId) {
-            updateImportedTender(importUpdateId, tender, tender.importUpdateFields ?? []);
-            return;
-        }
-
-        ensureImportedUser(tender.owner);
-        const id = `lic-import-${importedAt}-${index}`;
-        const record = { id, ...tenderData };
-        state.tenders.unshift(record);
-        syncTenderPresentationEvent(record);
-    });
-
-    clearImportPreview();
-    saveState();
-    setSection('licitaciones');
+    try {
+        // El servidor aplica el lote en una transaccion (alta de usuarios y auto-eventos incluidos).
+        await api.mutate('POST', '/api/tenders/import/commit', { rows: selectedTenders });
+        await refreshGlobals();
+        clearImportPreview();
+        setSection('licitaciones');
+    } catch (error) {
+        handleMutationError(error);
+    }
 }
 
+// Parsea el TSV pegado a filas estructuradas; la deduplicacion la hace el servidor.
 function parseImportedTenders(rawText) {
     const rows = parseTsv(rawText).filter((row) => row.some((cell) => cleanImportCell(cell)));
 
@@ -1887,9 +2054,7 @@ function parseImportedTenders(rawText) {
         throw new Error(`Faltan columnas requeridas: ${missing.join(', ')}`);
     }
 
-    const parsedRows = rows.slice(1).map((row) => tenderFromImportRow(headers, row)).filter(Boolean);
-
-    return filterImportedTenders(parsedRows);
+    return rows.slice(1).map((row) => tenderFromImportRow(headers, row)).filter(Boolean);
 }
 
 function parseTsv(text) {
@@ -2187,10 +2352,10 @@ function renderAdmin() {
     }
 
     const alerts = overloadedUsers();
-    const missingOffers = missingEconomicOfferTenders();
+    const missingOffers = view.dashboard?.missingOffers ?? [];
 
     return `
-        ${renderEconomicOfferAlert(missingOffers)}
+        ${renderEconomicOfferAlert(missingOffers, view.dashboard?.missingOffersTotal ?? 0)}
         ${alerts.length ? `
             <section class="panel mb-6 border-rose-200 bg-rose-50">
                 <h2 class="text-lg font-bold text-rose-800">Alertas de carga</h2>
@@ -2272,17 +2437,34 @@ function renderAdmin() {
                 </div>
             </div>
         </section>
+        <section class="panel mt-6">
+            <div class="flex flex-wrap items-center justify-between gap-4">
+                <div>
+                    <h2 class="text-lg font-bold">Copia de seguridad</h2>
+                    <p class="mt-1 text-sm font-medium text-[#7082a4]">Exporta o importa toda la base de datos (licitaciones, hitos, equipo) y la configuracion en un archivo JSON.</p>
+                </div>
+                <button class="btn-secondary" type="button" data-action="export-backup">Exportar copia</button>
+            </div>
+            <div class="mt-6 rounded-lg border border-amber-200 bg-amber-50 p-5">
+                <h3 class="text-sm font-bold text-amber-900">Importar copia (reemplaza todos los datos actuales)</h3>
+                <p class="mt-1 text-sm font-semibold text-amber-800">Sube un archivo exportado por LiciTIC. Esta accion sustituye por completo las licitaciones, hitos, equipo y configuracion existentes.</p>
+                <div class="mt-4 flex flex-wrap items-center gap-3">
+                    <input class="field-control max-w-md" type="file" accept="application/json,.json" data-backup-input>
+                    <button class="btn-danger" type="button" data-action="import-backup">Importar y reemplazar</button>
+                </div>
+            </div>
+        </section>
     `;
 }
 
 function renderStatsBody() {
-    const tenders = visibleItems('tenders');
-    const total = tenders.length;
-    const active = tenders.filter((item) => item.status === 'En preparacion').length;
-    const review = tenders.filter((item) => item.status === 'En evaluacion').length;
-    const pending = tenders.filter((item) => item.status === 'En analisis').length;
-    const lost = tenders.filter((item) => item.status === 'Perdida').length;
-    const successRate = successRateFor(tenders);
+    const overview = view.overview ?? {};
+    const total = overview.total ?? 0;
+    const active = overview.active ?? 0;
+    const review = overview.review ?? 0;
+    const pending = overview.pending ?? 0;
+    const lost = overview.lost ?? 0;
+    const successRate = overview.successRate ?? 0;
 
     return `
         <div class="flex items-center justify-between gap-4">
@@ -2323,7 +2505,7 @@ function statRow(label, value, total, color, customColor = '') {
 }
 
 function renderUserStatsBody() {
-    const users = workloadAverageUsers();
+    const cards = view.overview?.userStats ?? [];
 
     return `
         <div class="mt-8 border-t border-[#e7edf6] pt-6">
@@ -2332,58 +2514,47 @@ function renderUserStatsBody() {
                 <p class="text-sm font-bold text-[#53658b]">Solo usuarios con rol user</p>
             </div>
             <div class="mt-5 grid gap-4 xl:grid-cols-2">
-                ${users.map((user) => userStatsCard(user)).join('') || '<p class="rounded-lg bg-slate-50 p-4 text-sm font-semibold text-[#53658b]">No hay usuarios con rol user para mostrar.</p>'}
+                ${cards.map((stat) => userStatsCard(stat)).join('') || '<p class="rounded-lg bg-slate-50 p-4 text-sm font-semibold text-[#53658b]">No hay usuarios con rol user para mostrar.</p>'}
             </div>
         </div>
     `;
 }
 
-function userStatsCard(user) {
-    const tenders = visibleItems('tenders').filter((tender) => userParticipatesInTender(tender, user));
-    const countedTenders = tenders.filter((tender) => !['Descartada', 'Desistida'].includes(tender.status));
-    const analysis = tenders.filter((tender) => tender.status === 'En analisis');
-    const prepared = tenders.filter((tender) => tender.status === 'En preparacion');
-    const evaluated = tenders.filter((tender) => tender.status === 'En evaluacion');
-    const won = tenders.filter((tender) => tender.status === 'Ganada').length;
-    const lost = tenders.filter((tender) => tender.status === 'Perdida').length;
-    const discarded = tenders.filter((tender) => ['Descartada', 'Desistida'].includes(tender.status)).length;
-    const totalBudget = evaluated.reduce((total, tender) => total + (Number(tender.budget) || 0), 0);
-    const preparedBudget = prepared.reduce((total, tender) => total + (Number(tender.budget) || 0), 0);
-    const offerTotal = economicOfferTotal(evaluatedTendersWithEconomicOffer(tenders));
-    const missingOfferCount = missingEconomicOfferCount(evaluated);
-    const workload = workloadForUser(user);
-    const closed = won + lost;
-    const successRate = closed ? Math.round((won / closed) * 100) : 0;
+function userStatsCard(stat) {
+    const workload = stat.load ?? 0;
+    const won = stat.won ?? 0;
+    const lost = stat.lost ?? 0;
+    const tone = workload > 100 ? 'bg-rose-600' : 'bg-violet-600';
 
     return `
         <article class="rounded-lg border border-[#dfe6f2] bg-white p-5">
             <div class="flex flex-wrap items-start justify-between gap-3">
                 <div>
-                    <p class="text-base font-bold">${escapeHtml(user.name)}</p>
-                    <p class="mt-1 text-sm font-semibold text-[#7082a4]">${escapeHtml(user.username)} · carga ${formatLoadValue(workload)}%</p>
+                    <p class="text-base font-bold">${escapeHtml(stat.name)}</p>
+                    <p class="mt-1 text-sm font-semibold text-[#7082a4]">${escapeHtml(stat.username ?? '')} · carga ${formatLoadValue(workload)}%</p>
                 </div>
                 <span class="status-pill ${workload > 100 ? 'status-rose' : 'status-blue'}">${formatLoadValue(workload)}%</span>
             </div>
             <div class="mt-4 h-2 rounded-full bg-[#eceff7]">
-                <div class="h-full rounded-full ${workloadTone(user)}" style="width:${Math.min(workload, 100)}%"></div>
+                <div class="h-full rounded-full ${tone}" style="width:${Math.min(workload, 100)}%"></div>
             </div>
             <div class="mt-5 grid gap-3 sm:grid-cols-5">
-                ${miniStat('Licitaciones', countedTenders.length)}
-                ${miniStat('En analisis', analysis.length)}
-                ${miniStat('En preparacion', prepared.length)}
-                ${miniStat('En evaluacion', evaluated.length)}
-                ${miniStat('Exito', `${successRate}%`)}
+                ${miniStat('Licitaciones', stat.counted ?? 0)}
+                ${miniStat('En analisis', stat.analysis ?? 0)}
+                ${miniStat('En preparacion', stat.prepared ?? 0)}
+                ${miniStat('En evaluacion', stat.evaluated ?? 0)}
+                ${miniStat('Exito', `${stat.successRate ?? 0}%`)}
             </div>
             <div class="mt-5 grid gap-3 sm:grid-cols-2">
-                ${miniStat('PBL acumulado', formatCurrency(totalBudget))}
-                ${miniStat('PBL preparacion', formatCurrency(preparedBudget))}
-                ${miniStat('Oferta economica', formatCurrency(offerTotal))}
-                ${miniStat('Ofertas pendientes', missingOfferCount)}
+                ${miniStat('PBL acumulado', formatCurrency(stat.evalBudget ?? 0))}
+                ${miniStat('PBL preparacion', formatCurrency(stat.preparedBudget ?? 0))}
+                ${miniStat('Oferta economica', formatCurrency(stat.offerTotal ?? 0))}
+                ${miniStat('Ofertas pendientes', stat.missingOffers ?? 0)}
             </div>
             <div class="mt-5 space-y-2 text-sm font-semibold text-[#53658b]">
                 ${statRow('Ganadas', won, Math.max(won + lost, 1), 'bg-emerald-500')}
                 ${statRow('Perdidas', lost, Math.max(won + lost, 1), 'bg-rose-500')}
-                ${statRow('Descartadas / desistidas (no computan)', discarded, Math.max(tenders.length, 1), 'bg-slate-400')}
+                ${statRow('Descartadas / desistidas (no computan)', stat.discarded ?? 0, Math.max(stat.totalTenders ?? 1, 1), 'bg-slate-400')}
             </div>
         </article>
     `;
@@ -2438,8 +2609,18 @@ function renderDeadlineList() {
     `;
 }
 
+function findEntityItem(entity, id) {
+    const inState = (state[entity] ?? []).find((record) => record.id === id);
+
+    if (inState) {
+        return inState;
+    }
+
+    return (searchResultsData[entity] ?? []).map((record) => record.item).find((record) => record.id === id) ?? null;
+}
+
 function openView(entity, id) {
-    const item = state[entity].find((record) => record.id === id);
+    const item = findEntityItem(entity, id);
 
     if (!item) {
         return;
@@ -2562,7 +2743,7 @@ function formatViewValue(key, value) {
 }
 
 function openForm(entity, id = null, preset = {}) {
-    const item = id ? state[entity].find((record) => record.id === id) : { ...preset };
+    const item = id ? findEntityItem(entity, id) : { ...preset };
     const isNew = !id;
 
     if ((isNew && !canCreate(entity)) || (!isNew && !canEdit(entity, item))) {
@@ -2711,12 +2892,11 @@ function closeModal() {
     modal.setAttribute('aria-hidden', 'true');
 }
 
-function saveForm(form) {
+async function saveForm(form) {
     const entity = form.dataset.entity;
     const id = form.dataset.id;
     const data = Object.fromEntries(new FormData(form).entries());
-    const existingItem = id ? state[entity].find((item) => item.id === id) : null;
-    const recordId = id || `${entity}-${Date.now()}`;
+    const existingItem = id ? findEntityItem(entity, id) : null;
 
     if ((id && !canEdit(entity, existingItem)) || (!id && !canCreate(entity))) {
         alert('No tienes permisos para guardar este registro.');
@@ -2729,21 +2909,31 @@ function saveForm(form) {
         return;
     }
 
-    if (entity === 'stats') {
-        state.stats = data;
-    } else if (entity === 'settings') {
-        state.settings = { ...state.settings, ...data };
-    } else if (id) {
-        state[entity] = state[entity].map((item) => item.id === id ? { ...item, ...data } : item);
-    } else {
-        state[entity].unshift({ id: recordId, ...data });
+    const endpoint = { tenders: 'tenders', events: 'milestones', team: 'members' }[entity];
+
+    try {
+        if (entity === 'stats') {
+            await api.mutate('PUT', '/api/settings', { stats: data });
+            await refreshGlobals();
+        } else if (entity === 'settings') {
+            await api.mutate('PUT', '/api/settings', { settings: { ...state.settings, ...data } });
+            await refreshGlobals();
+        } else if (id) {
+            await api.mutate('PUT', `/api/${endpoint}/${id}`, { ...data, expectedUpdatedAt: existingItem?.updatedAt });
+            if (entity === 'team') {
+                await refreshGlobals();
+            }
+        } else {
+            await api.mutate('POST', `/api/${endpoint}`, data);
+            if (entity === 'team') {
+                await refreshGlobals();
+            }
+        }
+    } catch (error) {
+        handleMutationError(error);
+        // Tras un conflicto recargamos para mostrar el estado real del servidor.
     }
 
-    if (entity === 'tenders') {
-        syncTenderPresentationEvent({ id: recordId, ...data }, existingItem);
-    }
-
-    saveState();
     closeModal();
     render();
 }
@@ -2828,8 +3018,8 @@ function syncTenderPresentationEvent(tender, previousTender = null) {
 function validateFormData(entity, data, id = '') {
     const allUserNames = state.team.map((member) => member.name);
 
-    if (entity === 'events' && !tenderByTitle(data.tender)) {
-        alert('Selecciona una licitacion existente para asociar el hito.');
+    if (entity === 'events' && !data.tender) {
+        alert('Indica la licitacion asociada al hito.');
         return false;
     }
 
@@ -2850,10 +3040,7 @@ function validateFormData(entity, data, id = '') {
         }
     }
 
-    if (entity === 'events' && !allUserNames.includes(data.owner)) {
-        alert('Selecciona un responsable que exista en usuarios.');
-        return false;
-    }
+    // Para hitos, el responsable lo deriva el servidor de la licitacion asociada.
 
     if (entity === 'team') {
         const username = data.username.trim().toLowerCase();
@@ -2889,7 +3076,7 @@ function validateFormData(entity, data, id = '') {
     return true;
 }
 
-function savePasswordForm(form) {
+async function savePasswordForm(form) {
     const data = Object.fromEntries(new FormData(form).entries());
 
     if (data.password !== data.password_confirmation) {
@@ -2902,41 +3089,45 @@ function savePasswordForm(form) {
         return;
     }
 
-    state.team = state.team.map((member) => member.id === form.dataset.id ? {
-        ...member,
-        password: data.password,
-        passwordResetAt: new Date().toISOString(),
-        mustChangePassword: Boolean(data.forceChange),
-        passwordPreview: `Actualizada (${data.password.length} caracteres)`,
-    } : member);
+    try {
+        await api.mutate('PUT', `/api/members/${form.dataset.id}/password`, { password: data.password });
+        await refreshGlobals();
+    } catch (error) {
+        handleMutationError(error);
+    }
 
-    saveState();
     closeModal();
     render();
 }
 
-function resetSettings() {
-    state.settings = structuredClone(defaults.settings);
-    saveState();
+async function persistSettings(partialSettings) {
+    state.settings = { ...state.settings, ...partialSettings };
+
+    try {
+        await api.mutate('PUT', '/api/settings', { settings: state.settings });
+    } catch (error) {
+        handleMutationError(error);
+    }
+
     render();
 }
 
+function resetSettings() {
+    persistSettings(structuredClone(defaults.settings));
+}
+
 function resetStatusColors() {
-    state.settings.statusColors = structuredClone(defaults.settings.statusColors);
-    saveState();
-    render();
+    persistSettings({ statusColors: structuredClone(defaults.settings.statusColors) });
 }
 
 function saveStatusColorsForm(form) {
     const colors = Object.fromEntries(new FormData(form).entries());
-
-    state.settings.statusColors = {
+    const statusColors = {
         ...state.settings.statusColors,
         ...Object.fromEntries(Object.entries(colors).filter(([, color]) => /^#[0-9a-f]{6}$/i.test(color))),
     };
 
-    saveState();
-    render();
+    persistSettings({ statusColors });
 }
 
 function handleFaviconUpload(input) {
@@ -2948,11 +3139,68 @@ function handleFaviconUpload(input) {
 
     const reader = new FileReader();
     reader.addEventListener('load', () => {
-        state.settings.favicon = reader.result;
-        saveState();
-        render();
+        persistSettings({ favicon: reader.result });
     });
     reader.readAsDataURL(file);
+}
+
+// Descarga una copia completa (datos + configuracion) como archivo JSON.
+async function exportBackup() {
+    try {
+        const data = await api.get('/api/admin/export');
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+
+        link.href = url;
+        link.download = `licitic-backup-${todayIso()}.json`;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(url);
+    } catch (error) {
+        alert('No se pudo exportar la copia. Reintenta.');
+    }
+}
+
+// Sube un JSON exportado y reemplaza por completo los datos y la configuracion.
+async function importBackup() {
+    const input = document.querySelector('[data-backup-input]');
+    const file = input?.files?.[0];
+
+    if (!file) {
+        alert('Selecciona un archivo de copia (.json).');
+        return;
+    }
+
+    let data;
+
+    try {
+        data = JSON.parse(await file.text());
+    } catch {
+        alert('El archivo no es un JSON valido.');
+        return;
+    }
+
+    if (!confirm('Esto REEMPLAZARA por completo los datos actuales (licitaciones, hitos, equipo y configuracion). Esta accion no se puede deshacer. Continuar?')) {
+        return;
+    }
+
+    try {
+        const result = await api.mutate('POST', '/api/admin/import', data);
+        await refreshGlobals();
+        alert(`Copia importada: ${result.tenders} licitaciones, ${result.events} hitos, ${result.team} usuarios.`);
+
+        // Si el usuario actual ya no existe en la copia, vuelve al login.
+        if (!currentUser()) {
+            storageRemove('bidsuite-auth');
+            auth = null;
+        }
+
+        setSection('admin');
+    } catch (error) {
+        handleMutationError(error);
+    }
 }
 
 function toggleReceptionDate(checkbox) {
@@ -3007,7 +3255,7 @@ function syncCoAuthorControl(form) {
     }
 }
 
-function deleteItem(entity, id) {
+async function deleteItem(entity, id) {
     if (!canDelete()) {
         alert('No tienes permisos para borrar registros.');
         return;
@@ -3017,8 +3265,17 @@ function deleteItem(entity, id) {
         return;
     }
 
-    state[entity] = state[entity].filter((item) => item.id !== id);
-    saveState();
+    const endpoint = { tenders: 'tenders', events: 'milestones', team: 'members' }[entity];
+
+    try {
+        await api.mutate('DELETE', `/api/${endpoint}/${id}`);
+        if (entity === 'team') {
+            await refreshGlobals();
+        }
+    } catch (error) {
+        handleMutationError(error);
+    }
+
     render();
 }
 
@@ -3044,6 +3301,12 @@ function sortTenders(column) {
         tenderSort = { column, direction: 'asc' };
     }
 
+    tenderPage = 1;
+    render();
+}
+
+function goToTenderPage(page) {
+    tenderPage = Math.max(1, Math.min(page, tenderPageMeta.lastPage || 1));
     render();
 }
 
@@ -3150,7 +3413,10 @@ document.addEventListener('click', (event) => {
         sortTenders(column);
     } else if (action === 'clear-tender-filters') {
         tenderColumnFilters = {};
+        tenderPage = 1;
         render();
+    } else if (action === 'tender-page') {
+        goToTenderPage(Number(trigger.dataset.page));
     } else if (action === 'delete') {
         deleteItem(entity, id);
     } else if (action === 'edit-stats') {
@@ -3161,6 +3427,10 @@ document.addEventListener('click', (event) => {
         resetSettings();
     } else if (action === 'reset-status-colors') {
         resetStatusColors();
+    } else if (action === 'export-backup') {
+        exportBackup();
+    } else if (action === 'import-backup') {
+        importBackup();
     } else if (action === 'password') {
         openPasswordForm(id);
     } else if (action === 'impersonate') {
@@ -3280,10 +3550,12 @@ document.addEventListener('change', (event) => {
     }
 });
 
+let tenderFilterTimer = null;
+
 document.addEventListener('input', (event) => {
     if (event.target.matches('[data-column-filter]')) {
         const column = event.target.dataset.columnFilter;
-        const value = event.target.value.trim().toLowerCase();
+        const value = event.target.value.trim();
 
         if (value) {
             tenderColumnFilters[column] = value;
@@ -3291,21 +3563,23 @@ document.addEventListener('input', (event) => {
             delete tenderColumnFilters[column];
         }
 
+        tenderPage = 1;
         pendingTenderFilterFocus = { column, position: event.target.selectionStart ?? value.length };
-        render();
+
+        // Debounce: una sola peticion al servidor cuando el usuario deja de teclear.
+        if (tenderFilterTimer) {
+            clearTimeout(tenderFilterTimer);
+        }
+        tenderFilterTimer = setTimeout(() => {
+            tenderFilterTimer = null;
+            render();
+        }, 300);
         return;
     }
 
     if (event.target.matches('[data-search]')) {
+        // La busqueda global se ejecuta al confirmar (Enter), no en cada tecla.
         query = event.target.value.trim();
-        searchCache = buildSearchCache();
-
-        if (currentSection === 'busqueda') {
-            searchResultsQuery = event.target.value.trim();
-            render();
-        } else {
-            render();
-        }
     }
 });
 
@@ -3344,4 +3618,20 @@ document.addEventListener('click', (event) => {
     }
 });
 
-setSection(window.location.hash.slice(1) || 'inicio');
+// Arranque: carga los datos globales (equipo + parametros) desde MySQL, recupera
+// la sesion local y pinta la seccion. La BD es la fuente de verdad.
+async function boot() {
+    try {
+        await loadGlobals();
+    } catch (error) {
+        if (content) {
+            content.innerHTML = '<section class="panel"><p class="text-sm font-semibold text-rose-600">No se pudo conectar con el servidor. Recarga la pagina.</p></section>';
+        }
+        return;
+    }
+
+    auth = loadAuth();
+    setSection(window.location.hash.slice(1) || 'inicio');
+}
+
+boot();
