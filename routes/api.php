@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\BackupController;
+use App\Http\Controllers\ExecutionController;
 use App\Http\Controllers\ImportController;
 use App\Http\Controllers\MemberController;
 use App\Http\Controllers\MetricsController;
@@ -29,6 +30,9 @@ Route::get('metrics/overview', [MetricsController::class, 'overview']);
 Route::get('metrics/report', [MetricsController::class, 'report']);
 Route::get('metrics/gantt', [MetricsController::class, 'gantt']);
 Route::get('metrics/notifications', [MetricsController::class, 'notifications']);
+
+Route::get('executions', [ExecutionController::class, 'index']);
+Route::put('executions/{tender}', [ExecutionController::class, 'update']);
 
 Route::get('search', [SearchController::class, 'index']);
 

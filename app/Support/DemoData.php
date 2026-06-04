@@ -55,6 +55,7 @@ class DemoData
             'logoLetter' => 'B',
             'primaryColor' => '#1d4ed8',
             'favicon' => '',
+            'loginBackground' => '',
             'passwordPolicy' => 'Minimo 4 caracteres; se aceptan 4 digitos.',
             'coAuthorOwnerLoadPercent' => '75',
             'coAuthorLoadPercent' => '50',

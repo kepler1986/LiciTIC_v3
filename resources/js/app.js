@@ -1,5 +1,6 @@
 const sections = [
-    { id: 'inicio', label: 'Inicio', icon: 'home' },
+    { id: 'inicio', label: 'Inicio Lici', icon: 'home' },
+    { id: 'ejecucion', label: 'Inicio Ejecucion', icon: 'rocket' },
     { id: 'licitaciones', label: 'Licitaciones', icon: 'file' },
     { id: 'calendario', label: 'Calendario', icon: 'calendar' },
     { id: 'estadisticas', label: 'Estadisticas', icon: 'chart' },
@@ -121,6 +122,10 @@ let pendingTenderFilterFocus = null;
 let tenderPage = 1;
 const tenderPerPage = 50;
 let tenderPageMeta = { total: 0, lastPage: 1, currentPage: 1 };
+// Sub-navegacion interna de la seccion Inicio Ejecucion (estado local, no en hash).
+let ejecucionView = 'home'; // 'home' | 'list' | 'detail'
+let ejecucionTenderId = null;
+let ejecucionDraft = null; // copia de trabajo del detalle en edicion
 
 function bindElements() {
     app = document.querySelector('[data-app]');
@@ -295,7 +300,7 @@ function canSeeAll() {
 // Que secciones puede ver cada rol: 'admin' solo admin; 'equipo'/'importar'
 // admin y manager; el resto, todos.
 function sectionAllowed(sectionId) {
-    if (sectionId === 'admin') {
+    if (sectionId === 'admin' || sectionId === 'ejecucion') {
         return isAdmin();
     }
 
@@ -623,23 +628,39 @@ function canDelete() {
 }
 
 function renderLogin() {
-    app.innerHTML = `
-        <main class="grid min-h-screen place-items-center bg-[#f6f8fc] px-4">
-            <section class="w-full max-w-md rounded-lg border border-[#dfe6f2] bg-white p-7 shadow-xl">
-                <div class="flex items-center gap-3">
-                    <span class="grid size-11 place-items-center rounded-lg bg-blue-700 text-2xl font-bold text-white">${escapeHtml(state.settings.logoLetter || 'B')}</span>
-                    <div>
-                        <h1 class="text-xl font-bold">${escapeHtml(state.settings.appName)}</h1>
-                        <p class="text-sm font-semibold text-[#7082a4]">Acceso de usuarios</p>
-                    </div>
+    const background = state.settings.loginBackground;
+    const card = `
+        <section class="w-full max-w-md rounded-lg border border-[#dfe6f2] bg-white p-7 shadow-xl">
+            <div class="flex items-center gap-3">
+                <span class="grid size-11 place-items-center rounded-lg bg-blue-700 text-2xl font-bold text-white">${escapeHtml(state.settings.logoLetter || 'B')}</span>
+                <div>
+                    <h1 class="text-xl font-bold">${escapeHtml(state.settings.appName)}</h1>
+                    <p class="text-sm font-semibold text-[#7082a4]">Acceso de usuarios</p>
                 </div>
-                <form class="mt-7 grid gap-4" data-login-form>
-                    <label class="field-label">Usuario o email<input class="field-control" name="username" autocomplete="username" required></label>
-                    <label class="field-label">Password<input class="field-control" type="password" name="password" minlength="4" autocomplete="current-password" required></label>
-                    <p class="hidden rounded-lg bg-rose-50 p-3 text-sm font-semibold text-rose-700" data-login-error>Usuario o password incorrectos.</p>
-                    <button class="btn-primary h-12" type="submit">Entrar</button>
-                </form>
-            </section>
+            </div>
+            <form class="mt-7 grid gap-4" data-login-form>
+                <label class="field-label">Usuario o email<input class="field-control" name="username" autocomplete="username" required></label>
+                <label class="field-label">Password<input class="field-control" type="password" name="password" minlength="4" autocomplete="current-password" required></label>
+                <p class="hidden rounded-lg bg-rose-50 p-3 text-sm font-semibold text-rose-700" data-login-error>Usuario o password incorrectos.</p>
+                <button class="btn-primary h-12" type="submit">Entrar</button>
+            </form>
+        </section>
+    `;
+
+    // Sin imagen: login centrado sobre fondo plano (como antes).
+    if (!background) {
+        app.innerHTML = `<main class="grid min-h-screen w-full place-items-center bg-[#f6f8fc] px-4">${card}</main>`;
+
+        return;
+    }
+
+    // Con imagen: tarjeta a la izquierda (fondo plano) e imagen rellenando la derecha.
+    app.innerHTML = `
+        <main class="flex min-h-screen w-full">
+            <div class="flex w-full items-center justify-center bg-[#f6f8fc] px-4 lg:w-[540px] lg:shrink-0">
+                ${card}
+            </div>
+            <div class="hidden flex-1 bg-cover bg-center lg:block" style="background-image:url('${background}')" aria-hidden="true"></div>
         </main>
     `;
 }
@@ -925,6 +946,7 @@ async function render() {
     const title = sections.find((item) => item.id === currentSection)?.label ?? 'Inicio';
     const renderers = {
         inicio: renderDashboard,
+        ejecucion: renderEjecucion,
         licitaciones: () => renderCollection('tenders'),
         calendario: renderCalendar,
         estadisticas: renderStats,
@@ -964,6 +986,12 @@ async function loadSectionData(section) {
         state.events = monthEvents.data ?? [];
         state.tenders = deadlineTenders.data ?? [];
         setWorkloadMap(dashboard.workloadPerUser);
+        return;
+    }
+
+    if (section === 'ejecucion') {
+        const result = await api.get('/api/executions', scopeParams());
+        view.executions = result.data ?? [];
         return;
     }
 
@@ -1084,6 +1112,10 @@ function sectionActions() {
         equipo: ['team', 'Nuevo miembro'],
     };
 
+    if (currentSection === 'ejecucion') {
+        return '';
+    }
+
     if (currentSection === 'informe') {
         return '<button class="btn-secondary" type="button" data-action="copy-report">Copiar documento</button>';
     }
@@ -1132,6 +1164,283 @@ function renderDashboard() {
             <article class="panel">${renderDeadlineList()}</article>
         </section>
     `;
+}
+
+// --- Inicio Ejecucion: gestion de licitaciones ganadas (solo admin) ---
+
+function ejecucionNumber(value) {
+    const num = Number(String(value ?? '').replace(',', '.').replace(/[^0-9.\-]/g, ''));
+
+    return Number.isFinite(num) ? num : 0;
+}
+
+// Suma meses preservando el dia (recortando al ultimo dia del mes si se desborda).
+function ejecucionAddMonths(isoDate, months) {
+    const [year, month, day] = isoDate.split('-').map(Number);
+    const target = new Date(year, (month - 1) + months, 1);
+    const lastDay = new Date(target.getFullYear(), target.getMonth() + 1, 0).getDate();
+
+    return dateKey(new Date(target.getFullYear(), target.getMonth(), Math.min(day, lastDay)));
+}
+
+// Calendario de pagos derivado de la configuracion del borrador.
+function computeEjecucionSchedule(draft, offer) {
+    const payments = Array.isArray(draft.milestonePayments) ? draft.milestonePayments : [];
+    const milestoneTotal = payments.reduce((sum, payment) => sum + ejecucionNumber(payment.amount), 0);
+    const remaining = Math.max(0, offer - milestoneTotal);
+    const frequency = Math.round(ejecucionNumber(draft.frequencyMonths));
+    const start = draft.startDate || '';
+    const end = draft.endDate || '';
+
+    const dates = [];
+    if (start && end && frequency > 0 && start <= end) {
+        let guard = 0;
+        let cursor = start;
+        while (cursor <= end && guard < 600) {
+            dates.push(cursor);
+            cursor = ejecucionAddMonths(start, frequency * dates.length);
+            guard += 1;
+        }
+    }
+
+    const installmentAmount = dates.length ? remaining / dates.length : 0;
+
+    return {
+        offer,
+        milestoneTotal,
+        remaining,
+        frequency,
+        valid: Boolean(start && end && frequency > 0 && start <= end),
+        installments: dates.map((date) => ({ date, amount: installmentAmount })),
+        installmentAmount,
+    };
+}
+
+function draftFromRecord(record) {
+    return {
+        signed: Boolean(record.signed),
+        startDate: record.startDate ?? '',
+        endDate: record.endDate ?? '',
+        frequencyMonths: record.frequencyMonths ?? '',
+        milestonePayments: (record.milestonePayments ?? []).map((payment) => ({
+            concept: payment.concept ?? '',
+            amount: payment.amount ?? '',
+            date: payment.date ?? '',
+        })),
+    };
+}
+
+function renderEjecucion() {
+    if (!isAdmin()) {
+        return '<section class="panel"><p class="text-sm font-semibold text-[#7082a4]">No tienes permisos para esta seccion.</p></section>';
+    }
+
+    if (ejecucionView === 'detail') {
+        return renderEjecucionDetail();
+    }
+
+    if (ejecucionView === 'list') {
+        return renderEjecucionList();
+    }
+
+    return renderEjecucionHome();
+}
+
+function renderEjecucionHome() {
+    return `
+        <section class="panel">
+            <div class="flex min-h-40 flex-col items-start justify-end gap-4">
+                <button class="btn-primary" type="button" data-action="ejecucion-list">Gestionar ejecucion de licitaciones ganadas</button>
+            </div>
+        </section>
+    `;
+}
+
+function renderEjecucionList() {
+    const items = view.executions ?? [];
+
+    const rows = items.map((item) => {
+        const signedPill = item.signed
+            ? '<span class="status-pill status-green">Firmada</span>'
+            : '<span class="status-pill status-amber">Sin firmar</span>';
+
+        return `
+            <div class="rounded-lg border border-[#e7edf6] bg-white p-4">
+                <div class="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                        <p class="font-bold text-[#21345d]">${escapeHtml(item.title)}</p>
+                        <p class="mt-1 text-sm font-semibold text-[#7082a4]">${escapeHtml(item.code ?? '')} · ${escapeHtml(item.client ?? '')} · ${formatEconomicOffer(item)}</p>
+                    </div>
+                    <div class="flex items-center gap-3">
+                        ${signedPill}
+                        <button class="btn-secondary" type="button" data-action="ejecucion-open" data-id="${escapeHtml(item.tenderId)}">Gestionar</button>
+                    </div>
+                </div>
+            </div>
+        `;
+    }).join('');
+
+    return `
+        <section class="panel">
+            <div class="flex flex-wrap items-center justify-between gap-3">
+                <h2 class="text-lg font-bold">Licitaciones ganadas</h2>
+                <button class="btn-secondary" type="button" data-action="ejecucion-back">Volver</button>
+            </div>
+            <div class="mt-5 grid gap-3">
+                ${items.length ? rows : '<p class="text-sm font-semibold text-[#7082a4]">No hay licitaciones en estado Ganada.</p>'}
+            </div>
+        </section>
+    `;
+}
+
+function renderEjecucionDetail() {
+    const record = (view.executions ?? []).find((item) => item.tenderId === ejecucionTenderId);
+
+    if (!record) {
+        return `
+            <section class="panel">
+                <button class="btn-secondary" type="button" data-action="ejecucion-back">Volver</button>
+                <p class="mt-4 text-sm font-semibold text-[#7082a4]">No se encontro la licitacion seleccionada.</p>
+            </section>
+        `;
+    }
+
+    if (!ejecucionDraft) {
+        ejecucionDraft = draftFromRecord(record);
+    }
+
+    const offer = ejecucionNumber(record.economicOffer);
+    const schedule = computeEjecucionSchedule(ejecucionDraft, offer);
+
+    const paymentRows = ejecucionDraft.milestonePayments.map((payment, index) => `
+        <div class="grid gap-2 rounded-lg border border-[#e7edf6] p-3 sm:grid-cols-[2fr_1fr_1fr_auto] sm:items-end">
+            <label class="field-label">Concepto<input class="field-control" type="text" value="${escapeHtml(payment.concept ?? '')}" data-ejecucion-payment="${index}" data-payment-key="concept"></label>
+            <label class="field-label">Importe<input class="field-control" type="number" min="0" step="0.01" inputmode="decimal" value="${escapeHtml(payment.amount ?? '')}" data-ejecucion-payment="${index}" data-payment-key="amount"></label>
+            <label class="field-label">Fecha<input class="field-control" type="date" value="${escapeHtml(payment.date ?? '')}" data-ejecucion-payment="${index}" data-payment-key="date"></label>
+            <button class="link-danger" type="button" data-action="ejecucion-remove-payment" data-index="${index}">Quitar</button>
+        </div>
+    `).join('');
+
+    const installmentRows = schedule.installments.map((installment, index) => `
+        <div class="flex items-center justify-between gap-3 border-b border-[#eef2f8] py-2 text-sm font-semibold last:border-0">
+            <span class="text-[#53658b]">Cuota ${index + 1} · ${formatDate(installment.date)}</span>
+            <span>${formatCurrency(installment.amount)}</span>
+        </div>
+    `).join('');
+
+    return `
+        <section class="panel">
+            <div class="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                    <h2 class="text-lg font-bold">${escapeHtml(record.title)}</h2>
+                    <p class="mt-1 text-sm font-semibold text-[#7082a4]">${escapeHtml(record.code ?? '')} · ${escapeHtml(record.client ?? '')} · Oferta economica: ${formatEconomicOffer(record)}</p>
+                </div>
+                <div class="flex gap-3">
+                    <button class="btn-secondary" type="button" data-action="ejecucion-back">Volver</button>
+                    <button class="btn-primary" type="button" data-action="ejecucion-save">Guardar</button>
+                </div>
+            </div>
+
+            <div class="mt-6 grid gap-4 sm:grid-cols-3">
+                <label class="flex items-center gap-3 rounded-lg border border-[#dfe6f2] p-4 text-sm font-bold text-[#21345d]"><input type="checkbox" data-ejecucion-field="signed" ${ejecucionDraft.signed ? 'checked' : ''}> Firmada</label>
+                <label class="field-label">Fecha inicio de ejecucion<input class="field-control" type="date" value="${escapeHtml(ejecucionDraft.startDate ?? '')}" data-ejecucion-field="startDate"></label>
+                <label class="field-label">Fecha fin de ejecucion<input class="field-control" type="date" value="${escapeHtml(ejecucionDraft.endDate ?? '')}" data-ejecucion-field="endDate"></label>
+            </div>
+            <div class="mt-4 grid gap-4 sm:grid-cols-3">
+                <label class="field-label">Periodicidad de cuotas (cada N meses)<input class="field-control" type="number" min="1" step="1" inputmode="numeric" value="${escapeHtml(ejecucionDraft.frequencyMonths ?? '')}" data-ejecucion-field="frequencyMonths"></label>
+            </div>
+        </section>
+
+        <section class="panel mt-6">
+            <div class="flex flex-wrap items-center justify-between gap-3">
+                <h3 class="text-lg font-bold">Pagos unicos por hitos</h3>
+                <button class="btn-secondary" type="button" data-action="ejecucion-add-payment">Anadir pago</button>
+            </div>
+            <div class="mt-4 grid gap-3">
+                ${ejecucionDraft.milestonePayments.length ? paymentRows : '<p class="text-sm font-semibold text-[#7082a4]">Sin pagos por hitos. Anade uno si la licitacion tiene pagos asociados a hitos concretos.</p>'}
+            </div>
+        </section>
+
+        <section class="panel mt-6">
+            <h3 class="text-lg font-bold">Plan de pagos restantes</h3>
+            <div class="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                ${ejecucionMetric('Oferta economica', formatCurrency(schedule.offer))}
+                ${ejecucionMetric('Pagos por hitos', formatCurrency(schedule.milestoneTotal))}
+                ${ejecucionMetric('Restante a cuotas', formatCurrency(schedule.remaining))}
+                ${ejecucionMetric('Importe por cuota', schedule.valid ? formatCurrency(schedule.installmentAmount) : 'Sin definir')}
+            </div>
+            <div class="mt-5">
+                ${schedule.valid
+                    ? `<p class="text-sm font-semibold text-[#53658b]">${schedule.installments.length} cuotas cada ${schedule.frequency} mes(es) desde ${formatDate(ejecucionDraft.startDate)} hasta ${formatDate(ejecucionDraft.endDate)}.</p>
+                       <div class="mt-3">${installmentRows}</div>`
+                    : '<p class="text-sm font-semibold text-amber-700">Completa fecha inicio, fecha fin y periodicidad para calcular las cuotas.</p>'}
+            </div>
+        </section>
+    `;
+}
+
+function ejecucionMetric(label, value) {
+    return `
+        <div class="rounded-lg border border-[#dfe6f2] bg-white p-4">
+            <p class="text-xs font-bold uppercase text-[#7082a4]">${escapeHtml(label)}</p>
+            <p class="mt-1 text-lg font-bold text-[#21345d]">${value}</p>
+        </div>
+    `;
+}
+
+// Vuelca el valor de un input de ejecucion en el borrador. Devuelve true si era uno.
+function updateEjecucionDraftField(target) {
+    if (!ejecucionDraft) {
+        return false;
+    }
+
+    if (target.matches('[data-ejecucion-field]')) {
+        const key = target.dataset.ejecucionField;
+        ejecucionDraft[key] = target.type === 'checkbox' ? target.checked : target.value;
+        return true;
+    }
+
+    if (target.matches('[data-ejecucion-payment]')) {
+        const index = Number(target.dataset.ejecucionPayment);
+        const key = target.dataset.paymentKey;
+        if (ejecucionDraft.milestonePayments[index]) {
+            ejecucionDraft.milestonePayments[index][key] = target.value;
+        }
+        return true;
+    }
+
+    return false;
+}
+
+async function saveEjecucion() {
+    if (!ejecucionDraft || !ejecucionTenderId) {
+        return;
+    }
+
+    const payload = {
+        signed: ejecucionDraft.signed,
+        startDate: ejecucionDraft.startDate || null,
+        endDate: ejecucionDraft.endDate || null,
+        frequencyMonths: ejecucionDraft.frequencyMonths || null,
+        milestonePayments: ejecucionDraft.milestonePayments
+            .filter((payment) => payment.concept || payment.amount || payment.date)
+            .map((payment) => ({
+                concept: payment.concept ?? '',
+                amount: payment.amount ?? '',
+                date: payment.date ?? '',
+            })),
+    };
+
+    try {
+        await api.mutate('PUT', `/api/executions/${ejecucionTenderId}`, payload);
+    } catch (error) {
+        handleMutationError(error);
+        return;
+    }
+
+    ejecucionView = 'list';
+    ejecucionDraft = null;
+    render();
 }
 
 function trendLabel(percent) {
@@ -2457,6 +2766,15 @@ function renderAdmin() {
                         <input class="field-control" type="file" accept="image/png,image/jpeg,image/svg+xml,image/x-icon" data-favicon-input>
                     </label>
                     ${state.settings.favicon ? '<p class="text-sm font-semibold text-emerald-700">Favicon personalizado activo.</p>' : '<p class="text-sm font-semibold text-[#7082a4]">Usando favicon por defecto.</p>'}
+                    <label class="field-label">Imagen de fondo del login
+                        <input class="field-control" type="file" accept="image/png,image/jpeg,image/webp" data-login-bg-input>
+                    </label>
+                    <div class="flex items-center gap-3">
+                        ${state.settings.loginBackground
+                            ? `<span class="h-16 w-28 shrink-0 overflow-hidden rounded-lg border border-[#dfe6f2]"><img src="${state.settings.loginBackground}" class="size-full object-cover" alt="Fondo de login"></span>
+                               <button class="link-danger" type="button" data-action="remove-login-bg">Quitar fondo</button>`
+                            : '<p class="text-sm font-semibold text-[#7082a4]">Sin imagen de fondo (login con color plano).</p>'}
+                    </div>
                     <div class="flex justify-end">
                         <button class="btn-primary" type="submit">Guardar parametros</button>
                     </div>
@@ -3239,6 +3557,52 @@ function handleFaviconUpload(input) {
     reader.readAsDataURL(file);
 }
 
+// Escala una imagen para que quepa en maxDim (lado mayor) preservando la proporcion.
+function scaleImageToDataUrl(file, maxDim = 1920, quality = 0.82) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+
+        reader.onerror = reject;
+        reader.onload = () => {
+            const image = new Image();
+
+            image.onerror = reject;
+            image.onload = () => {
+                const scale = Math.min(1, maxDim / Math.max(image.width, image.height));
+                const width = Math.round(image.width * scale);
+                const height = Math.round(image.height * scale);
+                const canvas = document.createElement('canvas');
+
+                canvas.width = width;
+                canvas.height = height;
+                canvas.getContext('2d').drawImage(image, 0, 0, width, height);
+                resolve(canvas.toDataURL('image/jpeg', quality));
+            };
+            image.src = reader.result;
+        };
+        reader.readAsDataURL(file);
+    });
+}
+
+async function handleLoginBackgroundUpload(input) {
+    const file = input.files?.[0];
+
+    if (!file) {
+        return;
+    }
+
+    try {
+        const dataUrl = await scaleImageToDataUrl(file, 1920, 0.82);
+        await persistSettings({ loginBackground: dataUrl });
+    } catch (error) {
+        alert('No se pudo procesar la imagen de fondo.');
+    }
+}
+
+function removeLoginBackground() {
+    persistSettings({ loginBackground: '' });
+}
+
 // Modal "Mi perfil": el usuario sube o quita su imagen de perfil.
 function openProfile() {
     const user = currentUser();
@@ -3556,8 +3920,8 @@ document.addEventListener('click', (event) => {
     }
 
     if (trigger.matches('[data-primary-action]')) {
-        if (currentSection === 'admin') {
-            setSection('admin');
+        if (currentSection === 'admin' || currentSection === 'ejecucion') {
+            setSection(currentSection);
             return;
         }
 
@@ -3585,6 +3949,31 @@ document.addEventListener('click', (event) => {
         openForm(entity);
     } else if (action === 'new-date') {
         openForm(entity, null, { date });
+    } else if (action === 'ejecucion-list') {
+        ejecucionView = 'list';
+        render();
+    } else if (action === 'ejecucion-open') {
+        const record = (view.executions ?? []).find((item) => item.tenderId === id);
+        ejecucionTenderId = id;
+        ejecucionDraft = record ? draftFromRecord(record) : null;
+        ejecucionView = 'detail';
+        render();
+    } else if (action === 'ejecucion-back') {
+        ejecucionView = ejecucionView === 'detail' ? 'list' : 'home';
+        ejecucionDraft = null;
+        render();
+    } else if (action === 'ejecucion-add-payment') {
+        if (ejecucionDraft) {
+            ejecucionDraft.milestonePayments.push({ concept: '', amount: '', date: '' });
+            render();
+        }
+    } else if (action === 'ejecucion-remove-payment') {
+        if (ejecucionDraft) {
+            ejecucionDraft.milestonePayments.splice(Number(trigger.dataset.index), 1);
+            render();
+        }
+    } else if (action === 'ejecucion-save') {
+        saveEjecucion();
     } else if (action === 'calendar-prev') {
         calendarCursor = addMonths(calendarCursor, -1);
         render();
@@ -3614,6 +4003,8 @@ document.addEventListener('click', (event) => {
         resetStatusColors();
     } else if (action === 'remove-avatar') {
         removeAvatar();
+    } else if (action === 'remove-login-bg') {
+        removeLoginBackground();
     } else if (action === 'export-backup') {
         exportBackup();
     } else if (action === 'import-backup') {
@@ -3701,6 +4092,10 @@ document.addEventListener('change', (event) => {
         handleFaviconUpload(event.target);
     }
 
+    if (event.target.matches('[data-login-bg-input]')) {
+        handleLoginBackgroundUpload(event.target);
+    }
+
     if (event.target.matches('[data-avatar-input]')) {
         handleAvatarUpload(event.target);
     }
@@ -3739,6 +4134,11 @@ document.addEventListener('change', (event) => {
 
         render();
     }
+
+    // Al confirmar un campo de ejecucion (blur/checkbox/fecha) recalculamos el plan.
+    if (updateEjecucionDraftField(event.target)) {
+        render();
+    }
 });
 
 let tenderFilterTimer = null;
@@ -3772,6 +4172,10 @@ document.addEventListener('input', (event) => {
         // La busqueda global se ejecuta al confirmar (Enter), no en cada tecla.
         query = event.target.value.trim();
     }
+
+    // Mientras se teclea en ejecucion solo actualizamos el borrador (sin re-render,
+    // para no perder el foco); el recalculo del plan se hace en el evento change.
+    updateEjecucionDraftField(event.target);
 });
 
 document.addEventListener('keydown', (event) => {
