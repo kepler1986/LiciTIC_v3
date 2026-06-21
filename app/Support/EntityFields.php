@@ -46,10 +46,14 @@ class EntityFields
         'id' => 'id',
         'tenderId' => 'tender_id',
         'signed' => 'signed',
+        'visible' => 'visible',
         'startDate' => 'start_date',
         'endDate' => 'end_date',
         'frequencyMonths' => 'frequency_months',
         'milestonePayments' => 'milestone_payments',
+        'installments' => 'installments',
+        'installmentPlans' => 'installment_plans',
+        'collectedMonths' => 'collected_months',
     ];
 
     public const MEMBER = [

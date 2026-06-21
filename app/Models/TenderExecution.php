@@ -14,6 +14,10 @@ class TenderExecution extends Model
 
     protected $casts = [
         'signed' => 'boolean',
+        'visible' => 'boolean',
         'milestone_payments' => 'array',
+        'installments' => 'array',
+        'installment_plans' => 'array',
+        'collected_months' => 'array',
     ];
 }

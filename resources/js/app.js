@@ -123,9 +123,10 @@ let tenderPage = 1;
 const tenderPerPage = 50;
 let tenderPageMeta = { total: 0, lastPage: 1, currentPage: 1 };
 // Sub-navegacion interna de la seccion Inicio Ejecucion (estado local, no en hash).
-let ejecucionView = 'home'; // 'home' | 'list' | 'detail'
+let ejecucionView = 'home'; // 'home' | 'list' | 'detail' | 'gantt'
 let ejecucionTenderId = null;
 let ejecucionDraft = null; // copia de trabajo del detalle en edicion
+let ejecucionGanttYear = new Date().getFullYear(); // año visible en el GANTT de pagos
 
 function bindElements() {
     app = document.querySelector('[data-app]');
@@ -1183,49 +1184,103 @@ function ejecucionAddMonths(isoDate, months) {
     return dateKey(new Date(target.getFullYear(), target.getMonth(), Math.min(day, lastDay)));
 }
 
-// Calendario de pagos derivado de la configuracion del borrador.
+// Suma de las cuotas de todos los planes de pago del borrador.
+function ejecucionPlansTotal(draft) {
+    return (Array.isArray(draft.installmentPlans) ? draft.installmentPlans : [])
+        .reduce((sum, plan) => sum + (Array.isArray(plan.cuotas) ? plan.cuotas : [])
+            .reduce((s, cuota) => s + ejecucionNumber(cuota.amount), 0), 0);
+}
+
+// Totales economicos del borrador: hitos + cuotas (todos los planes) y restante por asignar.
 function computeEjecucionSchedule(draft, offer) {
-    const payments = Array.isArray(draft.milestonePayments) ? draft.milestonePayments : [];
-    const milestoneTotal = payments.reduce((sum, payment) => sum + ejecucionNumber(payment.amount), 0);
-    const remaining = Math.max(0, offer - milestoneTotal);
-    const frequency = Math.round(ejecucionNumber(draft.frequencyMonths));
-    const start = draft.startDate || '';
-    const end = draft.endDate || '';
-
-    const dates = [];
-    if (start && end && frequency > 0 && start <= end) {
-        let guard = 0;
-        let cursor = start;
-        while (cursor <= end && guard < 600) {
-            dates.push(cursor);
-            cursor = ejecucionAddMonths(start, frequency * dates.length);
-            guard += 1;
-        }
-    }
-
-    const installmentAmount = dates.length ? remaining / dates.length : 0;
+    const milestoneTotal = (Array.isArray(draft.milestonePayments) ? draft.milestonePayments : [])
+        .reduce((sum, payment) => sum + ejecucionNumber(payment.amount), 0);
+    const installmentsTotal = ejecucionPlansTotal(draft);
 
     return {
         offer,
         milestoneTotal,
-        remaining,
-        frequency,
-        valid: Boolean(start && end && frequency > 0 && start <= end),
-        installments: dates.map((date) => ({ date, amount: installmentAmount })),
-        installmentAmount,
+        installmentsTotal,
+        remaining: offer - milestoneTotal - installmentsTotal,
     };
+}
+
+// Fechas mensuales de un plan segun inicio/fin/periodicidad.
+function planMonths(plan) {
+    const frequency = Math.round(ejecucionNumber(plan.frequencyMonths));
+    const start = plan.startDate || '';
+    const end = plan.endDate || '';
+
+    if (!(start && end && frequency > 0 && start <= end)) {
+        return [];
+    }
+
+    const dates = [];
+    let guard = 0;
+    let cursor = start;
+    while (cursor <= end && guard < 600) {
+        dates.push(cursor);
+        cursor = ejecucionAddMonths(start, frequency * dates.length);
+        guard += 1;
+    }
+
+    return dates;
+}
+
+// Importe por cuota de un plan segun su modo, repartido entre `count` meses:
+//  - perMonth: importe fijo indicado por cuota.
+//  - total:    pago total del plan dividido entre los meses.
+//  - remainder: (oferta - hitos - cuotas de los OTROS planes) dividido entre los meses.
+function planInstallmentAmount(plan, count, draft, offer, planIndex) {
+    if (count <= 0) {
+        return 0;
+    }
+
+    if (plan.mode === 'perMonth') {
+        return ejecucionNumber(plan.amount);
+    }
+
+    if (plan.mode === 'total') {
+        return ejecucionNumber(plan.amount) / count;
+    }
+
+    // remainder
+    const milestoneTotal = (Array.isArray(draft.milestonePayments) ? draft.milestonePayments : [])
+        .reduce((sum, payment) => sum + ejecucionNumber(payment.amount), 0);
+    const otherPlansTotal = (Array.isArray(draft.installmentPlans) ? draft.installmentPlans : [])
+        .reduce((sum, other, index) => {
+            if (index === planIndex) {
+                return sum;
+            }
+            return sum + (Array.isArray(other.cuotas) ? other.cuotas : [])
+                .reduce((s, cuota) => s + ejecucionNumber(cuota.amount), 0);
+        }, 0);
+    const remaining = Math.max(0, offer - milestoneTotal - otherPlansTotal);
+
+    return remaining / count;
 }
 
 function draftFromRecord(record) {
     return {
         signed: Boolean(record.signed),
+        visible: Boolean(record.visible),
         startDate: record.startDate ?? '',
         endDate: record.endDate ?? '',
-        frequencyMonths: record.frequencyMonths ?? '',
         milestonePayments: (record.milestonePayments ?? []).map((payment) => ({
             concept: payment.concept ?? '',
             amount: payment.amount ?? '',
             date: payment.date ?? '',
+        })),
+        installmentPlans: (record.installmentPlans ?? []).map((plan) => ({
+            mode: plan.mode ?? 'remainder',
+            startDate: plan.startDate ?? '',
+            endDate: plan.endDate ?? '',
+            frequencyMonths: plan.frequencyMonths ?? '',
+            amount: plan.amount ?? '',
+            cuotas: (plan.cuotas ?? []).map((cuota) => ({
+                date: cuota.date ?? '',
+                amount: cuota.amount ?? '',
+            })),
         })),
     };
 }
@@ -1237,6 +1292,10 @@ function renderEjecucion() {
 
     if (ejecucionView === 'detail') {
         return renderEjecucionDetail();
+    }
+
+    if (ejecucionView === 'gantt') {
+        return renderEjecucionGantt();
     }
 
     if (ejecucionView === 'list') {
@@ -1251,6 +1310,7 @@ function renderEjecucionHome() {
         <section class="panel">
             <div class="flex min-h-40 flex-col items-start justify-end gap-4">
                 <button class="btn-primary" type="button" data-action="ejecucion-list">Gestionar ejecucion de licitaciones ganadas</button>
+                <button class="btn-secondary" type="button" data-action="ejecucion-gantt">Calendario de pagos (GANTT)</button>
             </div>
         </section>
     `;
@@ -1284,7 +1344,10 @@ function renderEjecucionList() {
         <section class="panel">
             <div class="flex flex-wrap items-center justify-between gap-3">
                 <h2 class="text-lg font-bold">Licitaciones ganadas</h2>
-                <button class="btn-secondary" type="button" data-action="ejecucion-back">Volver</button>
+                <div class="flex gap-3">
+                    <button class="btn-secondary" type="button" data-action="ejecucion-gantt">Calendario de pagos</button>
+                    <button class="btn-secondary" type="button" data-action="ejecucion-back">Volver</button>
+                </div>
             </div>
             <div class="mt-5 grid gap-3">
                 ${items.length ? rows : '<p class="text-sm font-semibold text-[#7082a4]">No hay licitaciones en estado Ganada.</p>'}
@@ -1321,12 +1384,9 @@ function renderEjecucionDetail() {
         </div>
     `).join('');
 
-    const installmentRows = schedule.installments.map((installment, index) => `
-        <div class="flex items-center justify-between gap-3 border-b border-[#eef2f8] py-2 text-sm font-semibold last:border-0">
-            <span class="text-[#53658b]">Cuota ${index + 1} · ${formatDate(installment.date)}</span>
-            <span>${formatCurrency(installment.amount)}</span>
-        </div>
-    `).join('');
+    const plansHtml = ejecucionDraft.installmentPlans
+        .map((plan, index) => renderPlanCard(plan, index, ejecucionDraft, offer))
+        .join('');
 
     return `
         <section class="panel">
@@ -1341,13 +1401,13 @@ function renderEjecucionDetail() {
                 </div>
             </div>
 
-            <div class="mt-6 grid gap-4 sm:grid-cols-3">
+            <div class="mt-6 grid gap-4 sm:grid-cols-2">
                 <label class="flex items-center gap-3 rounded-lg border border-[#dfe6f2] p-4 text-sm font-bold text-[#21345d]"><input type="checkbox" data-ejecucion-field="signed" ${ejecucionDraft.signed ? 'checked' : ''}> Firmada</label>
+                <label class="flex items-center gap-3 rounded-lg border border-[#dfe6f2] p-4 text-sm font-bold text-[#21345d]"><input type="checkbox" data-ejecucion-field="visible" ${ejecucionDraft.visible ? 'checked' : ''}> Visible en el calendario de pagos</label>
+            </div>
+            <div class="mt-4 grid gap-4 sm:grid-cols-2">
                 <label class="field-label">Fecha inicio de ejecucion<input class="field-control" type="date" value="${escapeHtml(ejecucionDraft.startDate ?? '')}" data-ejecucion-field="startDate"></label>
                 <label class="field-label">Fecha fin de ejecucion<input class="field-control" type="date" value="${escapeHtml(ejecucionDraft.endDate ?? '')}" data-ejecucion-field="endDate"></label>
-            </div>
-            <div class="mt-4 grid gap-4 sm:grid-cols-3">
-                <label class="field-label">Periodicidad de cuotas (cada N meses)<input class="field-control" type="number" min="1" step="1" inputmode="numeric" value="${escapeHtml(ejecucionDraft.frequencyMonths ?? '')}" data-ejecucion-field="frequencyMonths"></label>
             </div>
         </section>
 
@@ -1362,21 +1422,108 @@ function renderEjecucionDetail() {
         </section>
 
         <section class="panel mt-6">
-            <h3 class="text-lg font-bold">Plan de pagos restantes</h3>
-            <div class="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-                ${ejecucionMetric('Oferta economica', formatCurrency(schedule.offer))}
-                ${ejecucionMetric('Pagos por hitos', formatCurrency(schedule.milestoneTotal))}
-                ${ejecucionMetric('Restante a cuotas', formatCurrency(schedule.remaining))}
-                ${ejecucionMetric('Importe por cuota', schedule.valid ? formatCurrency(schedule.installmentAmount) : 'Sin definir')}
+            <div class="flex flex-wrap items-center justify-between gap-3">
+                <h3 class="text-lg font-bold">Planes de pago por cuotas</h3>
+                <button class="btn-secondary" type="button" data-action="ejecucion-add-plan">Anadir plan de pago</button>
             </div>
-            <div class="mt-5">
-                ${schedule.valid
-                    ? `<p class="text-sm font-semibold text-[#53658b]">${schedule.installments.length} cuotas cada ${schedule.frequency} mes(es) desde ${formatDate(ejecucionDraft.startDate)} hasta ${formatDate(ejecucionDraft.endDate)}.</p>
-                       <div class="mt-3">${installmentRows}</div>`
-                    : '<p class="text-sm font-semibold text-amber-700">Completa fecha inicio, fecha fin y periodicidad para calcular las cuotas.</p>'}
+            <p class="mt-2 text-xs font-semibold text-[#7082a4]">Cada plan genera sus meses segun inicio, fin y periodicidad. Elige el modo: «Importe por cuota» (todas iguales al importe), «Pago total del plan» (se divide entre los meses) o «Dividir el resto» (oferta - hitos - otros planes). Tras anadir o quitar meses, pulsa «Recalcular importes» para repartir de nuevo.</p>
+            <div class="mt-4 grid gap-4">
+                ${ejecucionDraft.installmentPlans.length ? plansHtml : '<p class="text-sm font-semibold text-[#7082a4]">Sin planes de pago. Pulsa «Anadir plan de pago» para crear el primero.</p>'}
             </div>
         </section>
+
+        <section class="panel mt-6">
+            <h3 class="text-lg font-bold">Resumen economico</h3>
+            <div id="ejecucion-schedule">${ejecucionScheduleHtml(schedule)}</div>
+        </section>
     `;
+}
+
+// Tarjeta de un plan de pago: configuracion (modo/fechas/importe), botones de generacion y
+// la lista editable de meses. Los inputs viven fuera de #ejecucion-schedule, por lo que el
+// refresco de metricas no los reconstruye al teclear.
+function renderPlanCard(plan, planIndex, draft, offer) {
+    const subtotal = (plan.cuotas ?? []).reduce((sum, cuota) => sum + ejecucionNumber(cuota.amount), 0);
+    const hasMonths = (plan.cuotas ?? []).length > 0;
+
+    const amountLabel = plan.mode === 'perMonth' ? 'Importe por cuota'
+        : plan.mode === 'total' ? 'Pago total del plan'
+        : 'Importe (no aplica)';
+    const amountDisabled = plan.mode === 'remainder' ? 'disabled' : '';
+
+    const option = (value, label) => `<option value="${value}" ${plan.mode === value ? 'selected' : ''}>${label}</option>`;
+
+    const monthRows = (plan.cuotas ?? []).map((cuota, cuotaIndex) => `
+        <div class="grid gap-2 rounded-lg border border-[#e7edf6] bg-white p-3 sm:grid-cols-[1fr_1fr_auto] sm:items-end">
+            <label class="field-label">Mes (fecha)<input class="field-control" type="date" value="${escapeHtml(cuota.date ?? '')}" data-ejecucion-plan-cuota="${planIndex}" data-cuota-index="${cuotaIndex}" data-cuota-key="date"></label>
+            <label class="field-label">Importe<input class="field-control" type="number" min="0" step="0.01" inputmode="decimal" value="${escapeHtml(cuota.amount ?? '')}" data-ejecucion-plan-cuota="${planIndex}" data-cuota-index="${cuotaIndex}" data-cuota-key="amount"></label>
+            <button class="link-danger" type="button" data-action="ejecucion-plan-remove-month" data-plan="${planIndex}" data-index="${cuotaIndex}">Quitar mes</button>
+        </div>
+    `).join('');
+
+    return `
+        <div class="rounded-xl border border-[#dfe6f2] bg-[#f8fafd] p-4">
+            <div class="flex flex-wrap items-center justify-between gap-3">
+                <h4 class="text-base font-bold text-[#21345d]">Plan de pago ${planIndex + 1}</h4>
+                <button class="link-danger" type="button" data-action="ejecucion-remove-plan" data-index="${planIndex}">Eliminar plan</button>
+            </div>
+
+            <div class="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+                <label class="field-label">Modo
+                    <select class="field-control" data-ejecucion-plan="${planIndex}" data-plan-key="mode">
+                        ${option('remainder', 'Dividir el resto')}
+                        ${option('perMonth', 'Importe por cuota')}
+                        ${option('total', 'Pago total del plan')}
+                    </select>
+                </label>
+                <label class="field-label">Inicio<input class="field-control" type="date" value="${escapeHtml(plan.startDate ?? '')}" data-ejecucion-plan="${planIndex}" data-plan-key="startDate"></label>
+                <label class="field-label">Fin<input class="field-control" type="date" value="${escapeHtml(plan.endDate ?? '')}" data-ejecucion-plan="${planIndex}" data-plan-key="endDate"></label>
+                <label class="field-label">Cada N meses<input class="field-control" type="number" min="1" step="1" inputmode="numeric" value="${escapeHtml(plan.frequencyMonths ?? '')}" data-ejecucion-plan="${planIndex}" data-plan-key="frequencyMonths"></label>
+                <label class="field-label">${amountLabel}<input class="field-control" type="number" min="0" step="0.01" inputmode="decimal" value="${escapeHtml(plan.amount ?? '')}" data-ejecucion-plan="${planIndex}" data-plan-key="amount" ${amountDisabled}></label>
+            </div>
+
+            <div class="mt-3 flex flex-wrap gap-3">
+                <button class="btn-secondary" type="button" data-action="ejecucion-generate-plan" data-index="${planIndex}">Generar meses</button>
+                ${hasMonths ? `<button class="btn-secondary" type="button" data-action="ejecucion-recalc-plan" data-index="${planIndex}">Recalcular importes</button>` : ''}
+                <button class="btn-secondary" type="button" data-action="ejecucion-plan-add-month" data-index="${planIndex}">Anadir mes</button>
+            </div>
+
+            <div class="mt-3 grid gap-3">
+                ${hasMonths ? monthRows : '<p class="text-sm font-semibold text-[#7082a4]">Sin meses. Configura inicio, fin y periodicidad y pulsa «Generar meses».</p>'}
+            </div>
+
+            <p class="mt-3 text-right text-sm font-bold text-[#21345d]">Subtotal del plan: ${formatCurrency(subtotal)}</p>
+        </div>
+    `;
+}
+
+// HTML del resumen economico (metricas derivadas). Compartido entre el render inicial y el
+// refresco quirurgico; NO contiene inputs, para no reconstruirlos al teclear.
+function ejecucionScheduleHtml(schedule) {
+    const remainingClass = schedule.remaining < 0 ? 'text-rose-600' : 'text-[#21345d]';
+
+    return `
+        <div class="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            ${ejecucionMetric('Oferta economica', formatCurrency(schedule.offer))}
+            ${ejecucionMetric('Pagos por hitos', formatCurrency(schedule.milestoneTotal))}
+            ${ejecucionMetric('Total cuotas', formatCurrency(schedule.installmentsTotal))}
+            ${ejecucionMetric('Restante por asignar', `<span class="${remainingClass}">${formatCurrency(schedule.remaining)}</span>`)}
+        </div>
+        ${schedule.remaining < 0 ? '<p class="mt-3 text-sm font-semibold text-rose-600">El total de hitos y cuotas supera la oferta economica.</p>' : ''}
+    `;
+}
+
+// Recalcula solo el panel derivado sin reconstruir los inputs del formulario, para no
+// perder el foco/valor mientras se teclea (p. ej. el año en un input type=date).
+function refreshEjecucionDerived() {
+    const container = document.getElementById('ejecucion-schedule');
+    if (!container || !ejecucionDraft) {
+        return;
+    }
+
+    const record = (view.executions ?? []).find((item) => item.tenderId === ejecucionTenderId);
+    const offer = ejecucionNumber(record?.economicOffer);
+    container.innerHTML = ejecucionScheduleHtml(computeEjecucionSchedule(ejecucionDraft, offer));
 }
 
 function ejecucionMetric(label, value) {
@@ -1385,6 +1532,139 @@ function ejecucionMetric(label, value) {
             <p class="text-xs font-bold uppercase text-[#7082a4]">${escapeHtml(label)}</p>
             <p class="mt-1 text-lg font-bold text-[#21345d]">${value}</p>
         </div>
+    `;
+}
+
+// Agrupa los pagos de un proyecto (hitos + cuotas de todos los planes) por mes 'YYYY-MM'.
+function paymentsByMonthFor(record) {
+    const map = {};
+
+    const add = (date, label, amount) => {
+        const month = String(date ?? '').slice(0, 7);
+        if (!/^\d{4}-\d{2}$/.test(month)) {
+            return;
+        }
+        if (!map[month]) {
+            map[month] = { items: [], total: 0 };
+        }
+        const value = ejecucionNumber(amount);
+        map[month].items.push({ label, amount: value });
+        map[month].total += value;
+    };
+
+    (record.milestonePayments ?? []).forEach((payment) => {
+        add(payment.date, payment.concept || 'Pago por hito', payment.amount);
+    });
+
+    (record.installmentPlans ?? []).forEach((plan, planIndex) => {
+        (plan.cuotas ?? []).forEach((cuota) => {
+            add(cuota.date, `Plan ${planIndex + 1}`, cuota.amount);
+        });
+    });
+
+    return map;
+}
+
+// Calendario de pagos tipo GANTT: una fila por licitacion ganada, 12 meses del año
+// seleccionado. Cada celda colorea su estado (pendiente / vencido / cobrado) y al pasar
+// el raton muestra el desglose. Clic en una celda alterna "cobrado".
+function renderEjecucionGantt() {
+    // Solo aparecen los proyectos marcados como "Visible en el calendario de pagos".
+    const items = (view.executions ?? []).filter((record) => record.visible);
+    const year = ejecucionGanttYear;
+    const monthLabels = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
+    const currentMonth = currentMonthKey();
+
+    const headerCells = monthLabels
+        .map((label) => `<th class="border border-[#eef2f8] px-2 py-2 text-center text-xs font-bold uppercase text-[#7082a4]">${label}</th>`)
+        .join('');
+
+    const rows = items.map((record) => {
+        const byMonth = paymentsByMonthFor(record);
+        const collected = Array.isArray(record.collectedMonths) ? record.collectedMonths : [];
+
+        const cells = monthLabels.map((_, index) => {
+            const month = `${year}-${String(index + 1).padStart(2, '0')}`;
+            const cell = byMonth[month];
+
+            if (!cell || !cell.items.length) {
+                return '<td class="border border-[#eef2f8]"></td>';
+            }
+
+            const isCollected = collected.includes(month);
+            const isOverdue = !isCollected && month < currentMonth;
+            const bg = isCollected ? '#16a34a' : isOverdue ? '#e11d48' : '#dbe5fb';
+            const fg = isCollected || isOverdue ? '#ffffff' : '#1d3a8a';
+            const stateLabel = isCollected ? 'Cobrado' : isOverdue ? 'Vencido sin cobrar' : 'Pendiente';
+
+            const breakdown = cell.items
+                .map((payment) => `
+                    <div class="flex justify-between gap-3">
+                        <span>${escapeHtml(payment.label)}</span>
+                        <span class="font-bold">${formatCurrency(payment.amount)}</span>
+                    </div>
+                `)
+                .join('');
+
+            const titleText = `${stateLabel} · ${cell.items.map((payment) => `${payment.label}: ${formatCurrency(payment.amount)}`).join(' · ')} · Total ${formatCurrency(cell.total)}`;
+
+            return `
+                <td class="relative cursor-pointer border border-[#eef2f8] p-1 text-center"
+                    data-gantt-cell data-action="ejecucion-toggle-collected" data-id="${escapeHtml(record.tenderId)}" data-month="${month}"
+                    title="${escapeHtml(titleText)}">
+                    <div class="rounded-md px-1 py-2 text-xs font-bold" style="background:${bg};color:${fg}">${formatCurrency(cell.total)}</div>
+                    <div data-gantt-tip class="pointer-events-none fixed z-50 hidden w-56 -translate-x-1/2 rounded-lg border border-[#dfe6f2] bg-white p-3 text-left text-xs font-semibold text-[#21345d] shadow-lg">
+                        <p class="mb-1 text-[10px] font-bold uppercase text-[#7082a4]">${stateLabel}</p>
+                        ${breakdown}
+                        <div class="mt-2 flex justify-between gap-3 border-t border-[#eef2f8] pt-2">
+                            <span>Total</span><span class="font-bold">${formatCurrency(cell.total)}</span>
+                        </div>
+                    </div>
+                </td>
+            `;
+        }).join('');
+
+        return `
+            <tr>
+                <td class="sticky left-0 z-10 min-w-48 border border-[#eef2f8] bg-white px-3 py-2 align-top">
+                    <p class="text-sm font-bold text-[#21345d]">${escapeHtml(record.title ?? '')}</p>
+                    <p class="text-xs font-semibold text-[#7082a4]">${escapeHtml(record.code ?? '')} · ${escapeHtml(record.client ?? '')}</p>
+                </td>
+                ${cells}
+            </tr>
+        `;
+    }).join('');
+
+    return `
+        <section class="panel">
+            <div class="flex flex-wrap items-center justify-between gap-3">
+                <h2 class="text-lg font-bold">Calendario de pagos ${year}</h2>
+                <div class="flex items-center gap-2">
+                    <button class="btn-secondary" type="button" data-action="ejecucion-gantt-year" data-delta="-1">◀ ${year - 1}</button>
+                    <button class="btn-secondary" type="button" data-action="ejecucion-gantt-year" data-delta="1">${year + 1} ▶</button>
+                    <button class="btn-secondary" type="button" data-action="ejecucion-back">Volver</button>
+                </div>
+            </div>
+            <div class="mt-3 flex flex-wrap items-center gap-4 text-xs font-semibold text-[#53658b]">
+                <span class="flex items-center gap-2"><span class="inline-block h-3 w-3 rounded" style="background:#dbe5fb"></span>Pendiente</span>
+                <span class="flex items-center gap-2"><span class="inline-block h-3 w-3 rounded" style="background:#e11d48"></span>Vencido sin cobrar</span>
+                <span class="flex items-center gap-2"><span class="inline-block h-3 w-3 rounded" style="background:#16a34a"></span>Cobrado</span>
+                <span>Haz clic en una celda para marcarla como cobrada.</span>
+            </div>
+            <div class="mt-4 overflow-x-auto">
+                <table class="w-full border-collapse">
+                    <thead>
+                        <tr>
+                            <th class="sticky left-0 z-10 border border-[#eef2f8] bg-white px-3 py-2 text-left text-xs font-bold uppercase text-[#7082a4]">Proyecto</th>
+                            ${headerCells}
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${items.length ? rows : '<tr><td colspan="13" class="border border-[#eef2f8] p-6 text-center text-sm font-semibold text-[#7082a4]">No hay proyectos marcados como «Visible en el calendario de pagos». Marca la casilla en el detalle de cada licitacion ganada.</td></tr>'}
+                    </tbody>
+                </table>
+            </div>
+        </section>
     `;
 }
 
@@ -1409,6 +1689,32 @@ function updateEjecucionDraftField(target) {
         return true;
     }
 
+    if (target.matches('[data-ejecucion-plan]')) {
+        const planIndex = Number(target.dataset.ejecucionPlan);
+        const key = target.dataset.planKey;
+        const plan = ejecucionDraft.installmentPlans[planIndex];
+        if (plan) {
+            plan[key] = target.value;
+            // Cambiar el modo altera la UI (label/visibilidad del importe): re-render completo.
+            if (key === 'mode') {
+                render();
+                return false;
+            }
+        }
+        return true;
+    }
+
+    if (target.matches('[data-ejecucion-plan-cuota]')) {
+        const planIndex = Number(target.dataset.ejecucionPlanCuota);
+        const cuotaIndex = Number(target.dataset.cuotaIndex);
+        const key = target.dataset.cuotaKey;
+        const plan = ejecucionDraft.installmentPlans[planIndex];
+        if (plan && plan.cuotas[cuotaIndex]) {
+            plan.cuotas[cuotaIndex][key] = target.value;
+        }
+        return true;
+    }
+
     return false;
 }
 
@@ -1419,9 +1725,9 @@ async function saveEjecucion() {
 
     const payload = {
         signed: ejecucionDraft.signed,
+        visible: ejecucionDraft.visible,
         startDate: ejecucionDraft.startDate || null,
         endDate: ejecucionDraft.endDate || null,
-        frequencyMonths: ejecucionDraft.frequencyMonths || null,
         milestonePayments: ejecucionDraft.milestonePayments
             .filter((payment) => payment.concept || payment.amount || payment.date)
             .map((payment) => ({
@@ -1429,6 +1735,16 @@ async function saveEjecucion() {
                 amount: payment.amount ?? '',
                 date: payment.date ?? '',
             })),
+        installmentPlans: ejecucionDraft.installmentPlans.map((plan) => ({
+            mode: plan.mode ?? 'remainder',
+            startDate: plan.startDate ?? '',
+            endDate: plan.endDate ?? '',
+            frequencyMonths: plan.frequencyMonths ?? '',
+            amount: plan.amount ?? '',
+            cuotas: (plan.cuotas ?? [])
+                .filter((cuota) => cuota.date || cuota.amount)
+                .map((cuota) => ({ date: cuota.date ?? '', amount: cuota.amount ?? '' })),
+        })),
     };
 
     try {
@@ -1440,6 +1756,67 @@ async function saveEjecucion() {
 
     ejecucionView = 'list';
     ejecucionDraft = null;
+    render();
+}
+
+// Genera (crea los meses desde inicio/fin/periodicidad) o recalcula (conserva los meses
+// actuales y reparte los importes) un plan segun su modo.
+function applyPlanGeneration(planIndex, recalcOnly) {
+    if (!ejecucionDraft) {
+        return;
+    }
+    const plan = ejecucionDraft.installmentPlans[planIndex];
+    if (!plan) {
+        return;
+    }
+
+    const record = (view.executions ?? []).find((item) => item.tenderId === ejecucionTenderId);
+    const offer = ejecucionNumber(record?.economicOffer);
+
+    let dates;
+    if (recalcOnly) {
+        if (!plan.cuotas.length) {
+            return;
+        }
+        dates = plan.cuotas.map((cuota) => cuota.date);
+    } else {
+        dates = planMonths(plan);
+        if (!dates.length) {
+            alert('Configura inicio, fin y periodicidad validos para generar los meses.');
+            return;
+        }
+    }
+
+    if ((plan.mode === 'perMonth' || plan.mode === 'total') && ejecucionNumber(plan.amount) <= 0) {
+        alert('Indica el importe del plan (por cuota o total) antes de generar.');
+        return;
+    }
+
+    const amount = planInstallmentAmount(plan, dates.length, ejecucionDraft, offer, planIndex);
+    plan.cuotas = dates.map((date) => ({ date, amount: amount.toFixed(2) }));
+    render();
+}
+
+// Alterna el estado "cobrado" de un mes (celda del GANTT) y lo persiste. Persistimos
+// antes de re-renderizar porque render() recarga /api/executions y pisaria un cambio local.
+async function toggleCollectedMonth(tenderId, month) {
+    const record = (view.executions ?? []).find((item) => item.tenderId === tenderId);
+    if (!record || !month) {
+        return;
+    }
+
+    const current = Array.isArray(record.collectedMonths) ? record.collectedMonths : [];
+    const next = current.includes(month)
+        ? current.filter((value) => value !== month)
+        : [...current, month];
+
+    try {
+        await api.mutate('PUT', `/api/executions/${tenderId}`, { collectedMonths: next });
+    } catch (error) {
+        handleMutationError(error);
+        return;
+    }
+
     render();
 }
 
@@ -3972,8 +4349,49 @@ document.addEventListener('click', (event) => {
             ejecucionDraft.milestonePayments.splice(Number(trigger.dataset.index), 1);
             render();
         }
+    } else if (action === 'ejecucion-add-plan') {
+        if (ejecucionDraft) {
+            ejecucionDraft.installmentPlans.push({ mode: 'remainder', startDate: '', endDate: '', frequencyMonths: '', amount: '', cuotas: [] });
+            render();
+        }
+    } else if (action === 'ejecucion-remove-plan') {
+        if (ejecucionDraft) {
+            ejecucionDraft.installmentPlans.splice(Number(trigger.dataset.index), 1);
+            render();
+        }
+    } else if (action === 'ejecucion-generate-plan') {
+        applyPlanGeneration(Number(trigger.dataset.index), false);
+    } else if (action === 'ejecucion-recalc-plan') {
+        applyPlanGeneration(Number(trigger.dataset.index), true);
+    } else if (action === 'ejecucion-plan-add-month') {
+        if (ejecucionDraft) {
+            const plan = ejecucionDraft.installmentPlans[Number(trigger.dataset.index)];
+            if (plan) {
+                const freq = Math.round(ejecucionNumber(plan.frequencyMonths)) || 1;
+                const last = plan.cuotas[plan.cuotas.length - 1];
+                const date = last && last.date ? ejecucionAddMonths(last.date, freq) : (plan.startDate || '');
+                plan.cuotas.push({ date, amount: '' });
+                render();
+            }
+        }
+    } else if (action === 'ejecucion-plan-remove-month') {
+        if (ejecucionDraft) {
+            const plan = ejecucionDraft.installmentPlans[Number(trigger.dataset.plan)];
+            if (plan) {
+                plan.cuotas.splice(Number(trigger.dataset.index), 1);
+                render();
+            }
+        }
     } else if (action === 'ejecucion-save') {
         saveEjecucion();
+    } else if (action === 'ejecucion-gantt') {
+        ejecucionView = 'gantt';
+        render();
+    } else if (action === 'ejecucion-gantt-year') {
+        ejecucionGanttYear += Number(trigger.dataset.delta);
+        render();
+    } else if (action === 'ejecucion-toggle-collected') {
+        toggleCollectedMonth(id, trigger.dataset.month);
     } else if (action === 'calendar-prev') {
         calendarCursor = addMonths(calendarCursor, -1);
         render();
@@ -4037,6 +4455,36 @@ document.addEventListener('click', (event) => {
         clearImportPreview();
         render();
     }
+});
+
+// Tooltip del GANTT de pagos: se posiciona con `fixed` (relativo al viewport) para que no lo
+// recorte el contenedor con overflow del calendario. Asi el desglose se ve sin scroll.
+document.addEventListener('mouseover', (event) => {
+    const cell = event.target.closest('[data-gantt-cell]');
+    if (!cell) {
+        return;
+    }
+    const tip = cell.querySelector('[data-gantt-tip]');
+    if (!tip) {
+        return;
+    }
+    // Mostrar antes de medir para conocer su altura real.
+    tip.classList.remove('hidden');
+    const rect = cell.getBoundingClientRect();
+    const tipHeight = tip.offsetHeight;
+    // Centrado bajo la celda; si no cabe debajo, se muestra encima.
+    const below = rect.bottom + 8;
+    const showAbove = below + tipHeight > window.innerHeight && rect.top - tipHeight - 8 > 0;
+    tip.style.left = `${rect.left + rect.width / 2}px`;
+    tip.style.top = showAbove ? `${rect.top - tipHeight - 8}px` : `${below}px`;
+});
+
+document.addEventListener('mouseout', (event) => {
+    const cell = event.target.closest('[data-gantt-cell]');
+    if (!cell || cell.contains(event.relatedTarget)) {
+        return;
+    }
+    cell.querySelector('[data-gantt-tip]')?.classList.add('hidden');
 });
 
 document.addEventListener('submit', (event) => {
@@ -4135,9 +4583,11 @@ document.addEventListener('change', (event) => {
         render();
     }
 
-    // Al confirmar un campo de ejecucion (blur/checkbox/fecha) recalculamos el plan.
+    // Al confirmar un campo de ejecucion (blur/checkbox/fecha) recalculamos solo el panel
+    // derivado; NO re-renderizamos todo para no destruir el input que se esta editando
+    // (si no, al teclear el año en un type=date se pierde el foco antes de completarlo).
     if (updateEjecucionDraftField(event.target)) {
-        render();
+        refreshEjecucionDerived();
     }
 });
 

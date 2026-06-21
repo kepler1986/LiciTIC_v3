@@ -13,10 +13,14 @@ class ExecutionController extends Controller
     /** Valores por defecto de ejecucion para una licitacion aun sin registro. */
     private const EXECUTION_DEFAULTS = [
         'signed' => false,
+        'visible' => false,
         'startDate' => null,
         'endDate' => null,
         'frequencyMonths' => null,
         'milestonePayments' => [],
+        'installments' => [],
+        'installmentPlans' => [],
+        'collectedMonths' => [],
     ];
 
     /** Licitaciones ganadas con sus datos de ejecucion fusionados. */
@@ -36,6 +40,10 @@ class ExecutionController extends Controller
                 $exec = EntityFields::toCamel($model, EntityFields::EXECUTION);
                 unset($exec['id'], $exec['updatedAt']);
                 $exec['milestonePayments'] = $exec['milestonePayments'] ?? [];
+                $exec['installments'] = $exec['installments'] ?? [];
+                $exec['installmentPlans'] = $exec['installmentPlans'] ?? [];
+                $exec['collectedMonths'] = $exec['collectedMonths'] ?? [];
+                $exec['visible'] = (bool) ($exec['visible'] ?? false);
             } else {
                 $exec = self::EXECUTION_DEFAULTS;
             }
