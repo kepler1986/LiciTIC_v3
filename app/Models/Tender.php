@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class Tender extends Model
 {
@@ -24,6 +25,16 @@ class Tender extends Model
     public function milestones(): HasMany
     {
         return $this->hasMany(Milestone::class, 'tender_id');
+    }
+
+    public function comments(): HasMany
+    {
+        return $this->hasMany(TenderComment::class, 'tender_id');
+    }
+
+    public function execution(): HasOne
+    {
+        return $this->hasOne(TenderExecution::class, 'tender_id');
     }
 
     public function scopeActive($query)

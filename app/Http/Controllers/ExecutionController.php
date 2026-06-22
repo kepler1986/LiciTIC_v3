@@ -14,6 +14,7 @@ class ExecutionController extends Controller
     private const EXECUTION_DEFAULTS = [
         'signed' => false,
         'visible' => false,
+        'hidden' => false,
         'startDate' => null,
         'endDate' => null,
         'frequencyMonths' => null,
@@ -44,6 +45,7 @@ class ExecutionController extends Controller
                 $exec['installmentPlans'] = $exec['installmentPlans'] ?? [];
                 $exec['collectedMonths'] = $exec['collectedMonths'] ?? [];
                 $exec['visible'] = (bool) ($exec['visible'] ?? false);
+                $exec['hidden'] = (bool) ($exec['hidden'] ?? false);
             } else {
                 $exec = self::EXECUTION_DEFAULTS;
             }

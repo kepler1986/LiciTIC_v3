@@ -47,6 +47,7 @@ class EntityFields
         'tenderId' => 'tender_id',
         'signed' => 'signed',
         'visible' => 'visible',
+        'hidden' => 'hidden',
         'startDate' => 'start_date',
         'endDate' => 'end_date',
         'frequencyMonths' => 'frequency_months',
@@ -54,6 +55,13 @@ class EntityFields
         'installments' => 'installments',
         'installmentPlans' => 'installment_plans',
         'collectedMonths' => 'collected_months',
+    ];
+
+    public const COMMENT = [
+        'id' => 'id',
+        'tenderId' => 'tender_id',
+        'author' => 'author',
+        'body' => 'body',
     ];
 
     public const MEMBER = [

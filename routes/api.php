@@ -1,8 +1,10 @@
 <?php
 
 use App\Http\Controllers\BackupController;
+use App\Http\Controllers\CommentController;
 use App\Http\Controllers\ExecutionController;
 use App\Http\Controllers\ImportController;
+use App\Http\Controllers\MergeController;
 use App\Http\Controllers\MemberController;
 use App\Http\Controllers\MetricsController;
 use App\Http\Controllers\MilestoneController;
@@ -15,8 +17,16 @@ use Illuminate\Support\Facades\Route;
 Route::post('tenders/import/preview', [ImportController::class, 'preview']);
 Route::post('tenders/import/commit', [ImportController::class, 'commit']);
 
+// Verificador y fusionador de duplicados (antes del resource para evitar colisiones).
+Route::get('tenders/duplicates', [MergeController::class, 'duplicates']);
+Route::post('tenders/merge', [MergeController::class, 'merge']);
+
 Route::apiResource('tenders', TenderController::class);
 Route::apiResource('milestones', MilestoneController::class)->except(['show']);
+
+Route::get('comments', [CommentController::class, 'index']);
+Route::post('comments', [CommentController::class, 'store']);
+Route::delete('comments/{comment}', [CommentController::class, 'destroy']);
 
 Route::apiResource('members', MemberController::class)->except(['show']);
 Route::put('members/{member}/password', [MemberController::class, 'resetPassword']);

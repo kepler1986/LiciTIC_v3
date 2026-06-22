@@ -127,6 +127,13 @@ let ejecucionView = 'home'; // 'home' | 'list' | 'detail' | 'gantt'
 let ejecucionTenderId = null;
 let ejecucionDraft = null; // copia de trabajo del detalle en edicion
 let ejecucionGanttYear = new Date().getFullYear(); // año visible en el GANTT de pagos
+let ejecucionListQuery = ''; // texto del buscador de la lista de licitaciones ganadas
+let ejecucionShowHidden = false; // mostrar las licitaciones ocultas en lugar de las activas
+let ejecucionCollapsed = { managed: false, pending: false, hidden: false }; // grupos plegados de la lista
+
+let duplicateGroups = []; // grupos de posibles licitaciones duplicadas detectados por el servidor
+let mergeDraft = null; // estado de la fusion en curso: { tenders, primaryId, fields, executionSourceId }
+let viewComments = []; // comentarios cargados de la licitacion abierta en el detalle
 
 function bindElements() {
     app = document.querySelector('[data-app]');
@@ -971,6 +978,9 @@ async function render() {
         ${renderers[currentSection]()}
     `;
     restoreTenderFilterFocus();
+    if (currentSection === 'ejecucion' && ejecucionView === 'list') {
+        filterEjecucionList();
+    }
 }
 
 // Carga del servidor solo lo que la seccion necesita (pagina, rango o agregados).
@@ -1135,11 +1145,16 @@ function sectionActions() {
 
     const [entity, label] = actionBySection[currentSection] ?? actionBySection.inicio;
 
+    // En licitaciones, el admin puede verificar y fusionar posibles duplicados.
+    const duplicatesButton = currentSection === 'licitaciones' && isAdmin()
+        ? '<button class="btn-secondary" type="button" data-action="check-duplicates">Verificar duplicados</button>'
+        : '';
+
     if (!canCreate(entity)) {
-        return '';
+        return duplicatesButton;
     }
 
-    return `<button class="btn-primary" type="button" data-action="new" data-entity="${entity}">${label}</button>`;
+    return `${duplicatesButton}<button class="btn-primary" type="button" data-action="new" data-entity="${entity}">${label}</button>`;
 }
 
 function renderDashboard() {
@@ -1272,12 +1287,14 @@ function draftFromRecord(record) {
             date: payment.date ?? '',
         })),
         installmentPlans: (record.installmentPlans ?? []).map((plan) => ({
+            name: plan.name ?? '',
             mode: plan.mode ?? 'remainder',
             startDate: plan.startDate ?? '',
             endDate: plan.endDate ?? '',
             frequencyMonths: plan.frequencyMonths ?? '',
             amount: plan.amount ?? '',
             cuotas: (plan.cuotas ?? []).map((cuota) => ({
+                name: cuota.name ?? '',
                 date: cuota.date ?? '',
                 amount: cuota.amount ?? '',
             })),
@@ -1316,44 +1333,139 @@ function renderEjecucionHome() {
     `;
 }
 
-function renderEjecucionList() {
-    const items = view.executions ?? [];
+// Tarjeta de una licitacion ganada. `context` decide las acciones rapidas:
+//  'managed'  -> ya esta en el calendario de pagos (boton para quitarla)
+//  'pending'  -> aun no esta en el calendario (boton para anadirla)
+//  'hidden'   -> esta oculta (boton para mostrarla)
+function renderEjecucionCard(item, context) {
+    const signedPill = item.signed
+        ? '<span class="status-pill status-green">Firmada</span>'
+        : '<span class="status-pill status-amber">Sin firmar</span>';
+    // Texto indexado para el buscador (objeto, expediente, organismo, responsable).
+    const searchText = [item.title, item.code, item.client, item.owner].filter(Boolean).join(' ').toLowerCase();
+    const id = escapeHtml(item.tenderId);
 
-    const rows = items.map((item) => {
-        const signedPill = item.signed
-            ? '<span class="status-pill status-green">Firmada</span>'
-            : '<span class="status-pill status-amber">Sin firmar</span>';
+    const calendarButton = context === 'pending'
+        ? `<button class="btn-secondary" type="button" data-action="ejecucion-toggle-visible" data-id="${id}" data-value="1">+ Anadir al calendario</button>`
+        : context === 'managed'
+            ? `<button class="link-action" type="button" data-action="ejecucion-toggle-visible" data-id="${id}" data-value="0">Quitar del calendario</button>`
+            : '';
 
-        return `
-            <div class="rounded-lg border border-[#e7edf6] bg-white p-4">
-                <div class="flex flex-wrap items-center justify-between gap-3">
-                    <div>
-                        <p class="font-bold text-[#21345d]">${escapeHtml(item.title)}</p>
-                        <p class="mt-1 text-sm font-semibold text-[#7082a4]">${escapeHtml(item.code ?? '')} · ${escapeHtml(item.client ?? '')} · ${formatEconomicOffer(item)}</p>
-                    </div>
-                    <div class="flex items-center gap-3">
-                        ${signedPill}
-                        <button class="btn-secondary" type="button" data-action="ejecucion-open" data-id="${escapeHtml(item.tenderId)}">Gestionar</button>
-                    </div>
+    const hiddenButton = context === 'hidden'
+        ? `<button class="btn-secondary" type="button" data-action="ejecucion-toggle-hidden" data-id="${id}" data-value="0">Mostrar</button>`
+        : `<button class="link-action" type="button" data-action="ejecucion-toggle-hidden" data-id="${id}" data-value="1">Ocultar</button>`;
+
+    return `
+        <div class="rounded-lg border border-[#e7edf6] bg-white p-4" data-ejecucion-card data-search="${escapeHtml(searchText)}">
+            <div class="flex flex-wrap items-center justify-between gap-3">
+                <button type="button" class="flex-1 text-left transition hover:opacity-70" data-action="view" data-entity="tenders" data-id="${escapeHtml(item.id)}" title="Ver y editar la licitacion">
+                    <p class="font-bold text-[#21345d]">${escapeHtml(item.title)}</p>
+                    <p class="mt-1 text-sm font-semibold text-[#7082a4]">${escapeHtml(item.code ?? '')} · ${escapeHtml(item.client ?? '')} · ${formatEconomicOffer(item)}</p>
+                </button>
+                <div class="flex flex-wrap items-center justify-end gap-3">
+                    ${signedPill}
+                    ${calendarButton}
+                    <button class="btn-secondary" type="button" data-action="ejecucion-open" data-id="${id}">Gestionar</button>
+                    ${hiddenButton}
                 </div>
             </div>
+        </div>
+    `;
+}
+
+function ejecucionGroupHtml(key, title, hint, cards, accentClass) {
+    const collapsed = ejecucionCollapsed[key];
+    const cardContext = key === 'hidden' ? 'hidden' : null;
+
+    return `
+        <div data-ejecucion-group data-key="${key}">
+            <button type="button" class="mt-6 flex w-full items-center gap-2 border-b border-[#e7edf6] pb-2 text-left transition hover:opacity-70" data-action="ejecucion-toggle-group" data-key="${key}">
+                <span class="w-4 text-xs font-bold text-[#7082a4]" data-chevron>${collapsed ? '▸' : '▾'}</span>
+                <span class="size-2.5 rounded-full ${accentClass}"></span>
+                <h3 class="text-sm font-bold uppercase text-[#21345d]">${title} <span class="text-[#7082a4]">(${cards.length})</span></h3>
+                ${hint ? `<span class="text-xs font-semibold text-[#7082a4]">· ${hint}</span>` : ''}
+            </button>
+            <div class="mt-3 grid gap-3 ${collapsed ? 'hidden' : ''}" data-ejecucion-cards>
+                ${cards.length ? cards.map((item) => renderEjecucionCard(item, cardContext ?? (item.visible ? 'managed' : 'pending'))).join('') : '<p class="text-sm font-semibold text-[#7082a4]">Ninguna.</p>'}
+            </div>
+        </div>
+    `;
+}
+
+function renderEjecucionList() {
+    const items = view.executions ?? [];
+    const hiddenItems = items.filter((item) => item.hidden);
+    const activeItems = items.filter((item) => !item.hidden);
+    const managed = activeItems.filter((item) => item.visible);
+    const pending = activeItems.filter((item) => !item.visible);
+
+    const hiddenToggle = `<button class="btn-secondary ${ejecucionShowHidden ? 'ring-2 ring-blue-300' : ''}" type="button" data-action="ejecucion-show-hidden-toggle">${ejecucionShowHidden ? 'Ver activas' : `Ver ocultas (${hiddenItems.length})`}</button>`;
+
+    const body = ejecucionShowHidden
+        ? ejecucionGroupHtml('hidden', 'Ocultas', 'no aparecen en la lista activa ni en el calendario', hiddenItems, 'bg-slate-400')
+        : `
+            ${ejecucionGroupHtml('managed', 'En el calendario de pagos', 'gestionadas', managed, 'bg-emerald-500')}
+            ${ejecucionGroupHtml('pending', 'Pendientes de anadir al calendario', 'aun no estan en el calendario', pending, 'bg-amber-500')}
         `;
-    }).join('');
 
     return `
         <section class="panel">
             <div class="flex flex-wrap items-center justify-between gap-3">
                 <h2 class="text-lg font-bold">Licitaciones ganadas</h2>
-                <div class="flex gap-3">
+                <div class="flex flex-wrap gap-3">
+                    ${hiddenToggle}
                     <button class="btn-secondary" type="button" data-action="ejecucion-gantt">Calendario de pagos</button>
                     <button class="btn-secondary" type="button" data-action="ejecucion-back">Volver</button>
                 </div>
             </div>
-            <div class="mt-5 grid gap-3">
-                ${items.length ? rows : '<p class="text-sm font-semibold text-[#7082a4]">No hay licitaciones en estado Ganada.</p>'}
-            </div>
+            ${items.length ? `
+                <label class="field-label mt-4">Buscar licitacion
+                    <input class="field-control" type="search" placeholder="Filtra por objeto, expediente, organismo o responsable..." value="${escapeHtml(ejecucionListQuery)}" data-ejecucion-search autocomplete="off">
+                </label>
+            ` : ''}
+            ${items.length ? body : '<p class="mt-5 text-sm font-semibold text-[#7082a4]">No hay licitaciones en estado Ganada.</p>'}
+            <p class="mt-5 hidden text-sm font-semibold text-[#7082a4]" data-ejecucion-empty>Ninguna licitacion coincide con la busqueda.</p>
         </section>
     `;
+}
+
+// Filtra (mostrar/ocultar) las tarjetas de la lista de ejecucion segun el buscador, sin
+// re-render completo para no perder el foco. Oculta tambien los grupos que queden vacios.
+function filterEjecucionList() {
+    const groups = document.querySelectorAll('[data-ejecucion-group]');
+    if (!groups.length) {
+        return;
+    }
+    const q = ejecucionListQuery.trim().toLowerCase();
+    let totalVisible = 0;
+    groups.forEach((group) => {
+        const key = group.dataset.key;
+        let groupVisible = 0;
+        group.querySelectorAll('[data-ejecucion-card]').forEach((card) => {
+            const match = !q || (card.dataset.search ?? '').includes(q);
+            card.classList.toggle('hidden', !match);
+            if (match) {
+                groupVisible += 1;
+            }
+        });
+        // Mientras se busca expandimos el grupo para ver las coincidencias; sin busqueda, respetamos el plegado.
+        group.querySelector('[data-ejecucion-cards]')?.classList.toggle('hidden', q === '' && Boolean(ejecucionCollapsed[key]));
+        // Al buscar, esconde por completo los grupos sin coincidencias.
+        group.classList.toggle('hidden', q !== '' && groupVisible === 0);
+        totalVisible += groupVisible;
+    });
+    document.querySelector('[data-ejecucion-empty]')?.classList.toggle('hidden', totalVisible > 0);
+}
+
+// Aplica un cambio parcial (visible/hidden) a la ejecucion y recarga la seccion.
+async function patchExecution(tenderId, patch) {
+    try {
+        await api.mutate('PUT', `/api/executions/${tenderId}`, patch);
+    } catch (error) {
+        handleMutationError(error);
+        return;
+    }
+    render();
 }
 
 function renderEjecucionDetail() {
@@ -1454,7 +1566,8 @@ function renderPlanCard(plan, planIndex, draft, offer) {
     const option = (value, label) => `<option value="${value}" ${plan.mode === value ? 'selected' : ''}>${label}</option>`;
 
     const monthRows = (plan.cuotas ?? []).map((cuota, cuotaIndex) => `
-        <div class="grid gap-2 rounded-lg border border-[#e7edf6] bg-white p-3 sm:grid-cols-[1fr_1fr_auto] sm:items-end">
+        <div class="grid gap-2 rounded-lg border border-[#e7edf6] bg-white p-3 sm:grid-cols-[1.4fr_1fr_1fr_auto] sm:items-end">
+            <label class="field-label">Nombre de la cuota<input class="field-control" type="text" value="${escapeHtml(cuota.name ?? '')}" placeholder="Cuota ${cuotaIndex + 1}" data-ejecucion-plan-cuota="${planIndex}" data-cuota-index="${cuotaIndex}" data-cuota-key="name"></label>
             <label class="field-label">Mes (fecha)<input class="field-control" type="date" value="${escapeHtml(cuota.date ?? '')}" data-ejecucion-plan-cuota="${planIndex}" data-cuota-index="${cuotaIndex}" data-cuota-key="date"></label>
             <label class="field-label">Importe<input class="field-control" type="number" min="0" step="0.01" inputmode="decimal" value="${escapeHtml(cuota.amount ?? '')}" data-ejecucion-plan-cuota="${planIndex}" data-cuota-index="${cuotaIndex}" data-cuota-key="amount"></label>
             <button class="link-danger" type="button" data-action="ejecucion-plan-remove-month" data-plan="${planIndex}" data-index="${cuotaIndex}">Quitar mes</button>
@@ -1464,7 +1577,9 @@ function renderPlanCard(plan, planIndex, draft, offer) {
     return `
         <div class="rounded-xl border border-[#dfe6f2] bg-[#f8fafd] p-4">
             <div class="flex flex-wrap items-center justify-between gap-3">
-                <h4 class="text-base font-bold text-[#21345d]">Plan de pago ${planIndex + 1}</h4>
+                <label class="field-label flex-1 min-w-48">Nombre del plan de pago
+                    <input class="field-control text-base font-bold text-[#21345d]" type="text" value="${escapeHtml(plan.name ?? '')}" placeholder="Plan de pago ${planIndex + 1}" data-ejecucion-plan="${planIndex}" data-plan-key="name">
+                </label>
                 <button class="link-danger" type="button" data-action="ejecucion-remove-plan" data-index="${planIndex}">Eliminar plan</button>
             </div>
 
@@ -1558,7 +1673,7 @@ function paymentsByMonthFor(record) {
 
     (record.installmentPlans ?? []).forEach((plan, planIndex) => {
         (plan.cuotas ?? []).forEach((cuota) => {
-            add(cuota.date, `Plan ${planIndex + 1}`, cuota.amount);
+            add(cuota.date, cuota.name || plan.name || `Plan ${planIndex + 1}`, cuota.amount);
         });
     });
 
@@ -1569,8 +1684,8 @@ function paymentsByMonthFor(record) {
 // seleccionado. Cada celda colorea su estado (pendiente / vencido / cobrado) y al pasar
 // el raton muestra el desglose. Clic en una celda alterna "cobrado".
 function renderEjecucionGantt() {
-    // Solo aparecen los proyectos marcados como "Visible en el calendario de pagos".
-    const items = (view.executions ?? []).filter((record) => record.visible);
+    // Solo aparecen los proyectos marcados como "Visible en el calendario de pagos" y no ocultos.
+    const items = (view.executions ?? []).filter((record) => record.visible && !record.hidden);
     const year = ejecucionGanttYear;
     const monthLabels = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
     const currentMonth = currentMonthKey();
@@ -1579,15 +1694,43 @@ function renderEjecucionGantt() {
         .map((label) => `<th class="border border-[#eef2f8] px-2 py-2 text-center text-xs font-bold uppercase text-[#7082a4]">${label}</th>`)
         .join('');
 
-    const rows = items.map((record) => {
+    // Un proyecto solo figura en un año si su periodo de ejecucion solapa ese año
+    // o si tiene algun cobro/pago en el. Asi no aparece en años sin actividad.
+    const itemsForYear = items.filter((record) => {
+        const startMonth = String(record.startDate ?? '').slice(0, 7);
+        const endMonth = String(record.endDate ?? '').slice(0, 7);
+        const hasRange = /^\d{4}-\d{2}$/.test(startMonth) && /^\d{4}-\d{2}$/.test(endMonth);
+        const rangeOverlapsYear = hasRange && startMonth <= `${year}-12` && endMonth >= `${year}-01`;
+        const hasPaymentInYear = Object.keys(paymentsByMonthFor(record)).some((month) => month.startsWith(`${year}-`));
+
+        return rangeOverlapsYear || hasPaymentInYear;
+    });
+
+    const rows = itemsForYear.map((record) => {
         const byMonth = paymentsByMonthFor(record);
         const collected = Array.isArray(record.collectedMonths) ? record.collectedMonths : [];
+
+        // El proyecto solo aparece entre sus fechas de ejecucion (si se definieron al gestionarlo).
+        const startMonth = String(record.startDate ?? '').slice(0, 7);
+        const endMonth = String(record.endDate ?? '').slice(0, 7);
+        const hasRange = /^\d{4}-\d{2}$/.test(startMonth) && /^\d{4}-\d{2}$/.test(endMonth);
 
         const cells = monthLabels.map((_, index) => {
             const month = `${year}-${String(index + 1).padStart(2, '0')}`;
             const cell = byMonth[month];
+            const hasPayment = cell && cell.items.length;
+            const inRange = hasRange && month >= startMonth && month <= endMonth;
 
-            if (!cell || !cell.items.length) {
+            // Fuera del periodo de ejecucion: celda vacia (el proyecto no figura ese mes).
+            if (hasRange && !inRange) {
+                return '<td class="border border-[#eef2f8]"></td>';
+            }
+
+            if (!hasPayment) {
+                // Dentro del periodo pero sin pago: barra tenue que marca la duracion del proyecto.
+                if (hasRange && inRange) {
+                    return '<td class="border border-[#eef2f8] p-1" title="Periodo de ejecucion"><div class="rounded-md py-2" style="background:#eef2fb"></div></td>';
+                }
                 return '<td class="border border-[#eef2f8]"></td>';
             }
 
@@ -1649,6 +1792,7 @@ function renderEjecucionGantt() {
                 <span class="flex items-center gap-2"><span class="inline-block h-3 w-3 rounded" style="background:#dbe5fb"></span>Pendiente</span>
                 <span class="flex items-center gap-2"><span class="inline-block h-3 w-3 rounded" style="background:#e11d48"></span>Vencido sin cobrar</span>
                 <span class="flex items-center gap-2"><span class="inline-block h-3 w-3 rounded" style="background:#16a34a"></span>Cobrado</span>
+                <span class="flex items-center gap-2"><span class="inline-block h-3 w-3 rounded" style="background:#eef2fb"></span>Periodo de ejecucion</span>
                 <span>Haz clic en una celda para marcarla como cobrada.</span>
             </div>
             <div class="mt-4 overflow-x-auto">
@@ -1660,7 +1804,9 @@ function renderEjecucionGantt() {
                         </tr>
                     </thead>
                     <tbody>
-                        ${items.length ? rows : '<tr><td colspan="13" class="border border-[#eef2f8] p-6 text-center text-sm font-semibold text-[#7082a4]">No hay proyectos marcados como «Visible en el calendario de pagos». Marca la casilla en el detalle de cada licitacion ganada.</td></tr>'}
+                        ${!items.length
+                            ? '<tr><td colspan="13" class="border border-[#eef2f8] p-6 text-center text-sm font-semibold text-[#7082a4]">No hay proyectos marcados como «Visible en el calendario de pagos». Marca la casilla en el detalle de cada licitacion ganada.</td></tr>'
+                            : (itemsForYear.length ? rows : `<tr><td colspan="13" class="border border-[#eef2f8] p-6 text-center text-sm font-semibold text-[#7082a4]">Ningun proyecto tiene ejecucion ni cobros en ${year}.</td></tr>`)}
                     </tbody>
                 </table>
             </div>
@@ -1736,14 +1882,15 @@ async function saveEjecucion() {
                 date: payment.date ?? '',
             })),
         installmentPlans: ejecucionDraft.installmentPlans.map((plan) => ({
+            name: plan.name ?? '',
             mode: plan.mode ?? 'remainder',
             startDate: plan.startDate ?? '',
             endDate: plan.endDate ?? '',
             frequencyMonths: plan.frequencyMonths ?? '',
             amount: plan.amount ?? '',
             cuotas: (plan.cuotas ?? [])
-                .filter((cuota) => cuota.date || cuota.amount)
-                .map((cuota) => ({ date: cuota.date ?? '', amount: cuota.amount ?? '' })),
+                .filter((cuota) => cuota.name || cuota.date || cuota.amount)
+                .map((cuota) => ({ name: cuota.name ?? '', date: cuota.date ?? '', amount: cuota.amount ?? '' })),
         })),
     };
 
@@ -1793,7 +1940,9 @@ function applyPlanGeneration(planIndex, recalcOnly) {
     }
 
     const amount = planInstallmentAmount(plan, dates.length, ejecucionDraft, offer, planIndex);
-    plan.cuotas = dates.map((date) => ({ date, amount: amount.toFixed(2) }));
+    // Conserva los nombres de cuota existentes (por posicion) al (re)generar los importes.
+    const previousNames = (plan.cuotas ?? []).map((cuota) => cuota.name ?? '');
+    plan.cuotas = dates.map((date, index) => ({ name: previousNames[index] ?? '', date, amount: amount.toFixed(2) }));
     render();
 }
 
@@ -3396,6 +3545,8 @@ function findEntityItem(entity, id) {
         pools.push(view.report?.presentationsToday ?? []);
         pools.push(view.report?.awardsToday ?? []);
         pools.push(view.gantt?.tenders ?? []);
+        // En Ejecucion, las licitaciones ganadas viven en view.executions (id = id de la licitacion).
+        pools.push(view.executions ?? []);
     }
 
     for (const pool of pools) {
@@ -3430,8 +3581,14 @@ function openView(entity, id) {
             ${canEdit(entity, item) ? `<button class="btn-secondary" type="button" data-action="edit" data-entity="${entity}" data-id="${id}">Editar</button>` : ''}
             ${entity === 'events' && canDelete() ? `<button class="link-danger" type="button" data-action="delete" data-entity="${entity}" data-id="${id}">Borrar hito</button>` : ''}
         </div>
+        ${entity === 'tenders' ? '<div class="mt-6 border-t border-[#eef2f8] pt-5" data-comments><p class="text-sm font-semibold text-[#9aa7c2]">Cargando comentarios...</p></div>' : ''}
     `;
     showModal();
+
+    if (entity === 'tenders') {
+        viewComments = [];
+        loadTenderComments(id);
+    }
 }
 
 function viewEntriesFor(entity, item) {
@@ -3680,6 +3837,347 @@ function closeModal() {
     modal.classList.add('hidden');
     modal.classList.remove('flex');
     modal.setAttribute('aria-hidden', 'true');
+}
+
+// ----- Verificador y fusionador de licitaciones duplicadas -----
+
+// Campos de la licitacion comparables y fusionables (en orden de presentacion).
+const MERGE_FIELDS = ['code', 'title', 'lot', 'client', 'deadline', 'status', 'budget', 'economicOffer', 'economicOfferWaived', 'owner', 'coAuthored', 'coAuthor', 'presentedAt', 'adjudicationDate', 'description'];
+
+async function openDuplicatesModal() {
+    modalTitle.textContent = 'Verificar posibles duplicados';
+    modalBody.innerHTML = '<p class="p-4 text-sm font-semibold text-[#7082a4]">Buscando posibles duplicados por expediente...</p>';
+    showModal();
+
+    try {
+        const result = await api.get('/api/tenders/duplicates');
+        duplicateGroups = result.data ?? [];
+    } catch (error) {
+        modalBody.innerHTML = `<p class="rounded-lg bg-rose-50 p-4 text-sm font-semibold text-rose-700">No se pudieron cargar los duplicados. ${escapeHtml(error.message ?? '')}</p>`;
+        return;
+    }
+
+    renderDuplicatesModalBody();
+}
+
+function renderDuplicatesModalBody() {
+    mergeDraft = null;
+    modalTitle.textContent = 'Verificar posibles duplicados';
+
+    if (!duplicateGroups.length) {
+        modalBody.innerHTML = `
+            <p class="rounded-lg bg-emerald-50 p-4 text-sm font-semibold text-emerald-700">No se han detectado licitaciones con el mismo expediente.</p>
+            <div class="mt-6 flex justify-end"><button class="btn-secondary" type="button" data-close-modal>Cerrar</button></div>
+        `;
+        return;
+    }
+
+    modalBody.innerHTML = `
+        <p class="mb-4 text-sm font-semibold text-[#7082a4]">Se agrupan las licitaciones que comparten el mismo expediente. Revisa cada grupo y decide si son la misma licitacion para fusionarlas.</p>
+        <div class="grid gap-4">
+            ${duplicateGroups.map((group) => renderDuplicateGroupCard(group)).join('')}
+        </div>
+        <div class="mt-6 flex justify-end"><button class="btn-secondary" type="button" data-close-modal>Cerrar</button></div>
+    `;
+}
+
+function renderDuplicateGroupCard(group) {
+    return `
+        <article class="rounded-lg border border-[#e7edf6] p-4">
+            <div class="mb-3 flex flex-wrap items-center justify-between gap-3">
+                <div>
+                    <p class="text-xs font-bold uppercase text-[#7082a4]">Expediente${group.lot ? ' · Lote' : ''}</p>
+                    <p class="text-base font-bold text-[#21345d]">${escapeHtml(group.code ?? '')}${group.lot ? ` · Lote ${escapeHtml(group.lot)}` : ''} <span class="text-sm font-semibold text-[#7082a4]">· ${group.tenders.length} licitaciones</span></p>
+                </div>
+                <div class="flex flex-wrap gap-2">
+                    <button class="link-action" type="button" data-action="dismiss-duplicate-group" data-key="${escapeHtml(group.key)}">No son iguales</button>
+                    <button class="btn-primary" type="button" data-action="open-merge" data-key="${escapeHtml(group.key)}">Revisar y fusionar</button>
+                </div>
+            </div>
+            <div class="overflow-x-auto">
+                <table class="w-full text-left text-sm">
+                    <thead><tr class="text-xs font-bold uppercase text-[#7082a4]">
+                        <th class="py-1 pr-3">Objeto</th><th class="py-1 pr-3">Organismo</th><th class="py-1 pr-3">Estado</th>
+                        <th class="py-1 pr-3">Responsable</th><th class="py-1 pr-3">Hitos</th><th class="py-1 pr-3">Coment.</th><th class="py-1 pr-3">Ejec.</th>
+                    </tr></thead>
+                    <tbody>
+                        ${group.tenders.map((tender) => `
+                            <tr class="border-t border-[#eef2f8]">
+                                <td class="py-1.5 pr-3 font-semibold text-[#21345d]">${escapeHtml(tender.title ?? '')}</td>
+                                <td class="py-1.5 pr-3">${escapeHtml(tender.client ?? '')}</td>
+                                <td class="py-1.5 pr-3">${escapeHtml(tender.status ?? '')}</td>
+                                <td class="py-1.5 pr-3">${escapeHtml(tender.owner ?? '')}</td>
+                                <td class="py-1.5 pr-3">${tender.milestoneCount}</td>
+                                <td class="py-1.5 pr-3">${tender.commentCount}</td>
+                                <td class="py-1.5 pr-3">${tender.hasExecution ? 'Si' : 'No'}</td>
+                            </tr>
+                        `).join('')}
+                    </tbody>
+                </table>
+            </div>
+        </article>
+    `;
+}
+
+function dismissDuplicateGroup(key) {
+    duplicateGroups = duplicateGroups.filter((group) => group.key !== key);
+    renderDuplicatesModalBody();
+}
+
+function openMergeModal(key) {
+    const group = duplicateGroups.find((item) => item.key === key);
+
+    if (!group) {
+        return;
+    }
+
+    const primaryId = group.tenders[0].id;
+    const fields = {};
+    MERGE_FIELDS.forEach((field) => { fields[field] = primaryId; });
+
+    mergeDraft = {
+        key,
+        tenders: group.tenders,
+        primaryId,
+        fields,
+        executionSourceId: defaultExecutionSource(group.tenders, primaryId),
+    };
+
+    renderMergeModalBody();
+}
+
+// Por defecto conserva la ejecucion de la principal; si no tiene, la primera duplicada que tenga.
+function defaultExecutionSource(tenders, primaryId) {
+    const primary = tenders.find((tender) => tender.id === primaryId);
+    if (primary?.hasExecution) {
+        return primaryId;
+    }
+    return tenders.find((tender) => tender.hasExecution)?.id ?? null;
+}
+
+function setMergePrimary(id) {
+    if (!mergeDraft) {
+        return;
+    }
+    mergeDraft.primaryId = id;
+    // Al cambiar la principal, sus valores pasan a ser los predeterminados de cada campo.
+    MERGE_FIELDS.forEach((field) => { mergeDraft.fields[field] = id; });
+    mergeDraft.executionSourceId = defaultExecutionSource(mergeDraft.tenders, id);
+    renderMergeModalBody();
+}
+
+function setMergeField(field, id) {
+    if (mergeDraft) {
+        mergeDraft.fields[field] = id;
+        renderMergeModalBody();
+    }
+}
+
+function tenderShortLabel(tender) {
+    return tender.title || tender.code || tender.id;
+}
+
+function renderMergeModalBody() {
+    if (!mergeDraft) {
+        return;
+    }
+
+    const { tenders, primaryId } = mergeDraft;
+    const duplicates = tenders.filter((tender) => tender.id !== primaryId);
+    const incomingMilestones = duplicates.reduce((sum, tender) => sum + (tender.milestoneCount || 0), 0);
+    const incomingComments = duplicates.reduce((sum, tender) => sum + (tender.commentCount || 0), 0);
+    const executionsWith = tenders.filter((tender) => tender.hasExecution);
+
+    modalTitle.textContent = 'Fusionar licitaciones';
+
+    const primarySelector = `
+        <div class="rounded-lg border border-[#e7edf6] p-4">
+            <p class="text-xs font-bold uppercase text-[#7082a4]">1. Elige la licitacion principal (la que se conserva)</p>
+            <div class="mt-2 grid gap-2">
+                ${tenders.map((tender) => `
+                    <label class="flex items-start gap-2 text-sm font-semibold text-[#21345d]">
+                        <input type="radio" name="merge-primary" ${tender.id === primaryId ? 'checked' : ''} data-action="merge-set-primary" data-id="${tender.id}">
+                        <span>${escapeHtml(tenderShortLabel(tender))} <span class="text-[#7082a4]">· ${escapeHtml(tender.client ?? '')} · ${escapeHtml(tender.status ?? '')}</span></span>
+                    </label>
+                `).join('')}
+            </div>
+        </div>
+    `;
+
+    const fieldRows = MERGE_FIELDS.map((field) => {
+        // Solo pedir decision cuando los valores difieren entre las licitaciones.
+        const values = tenders.map((tender) => formatViewValue(field, tender[field]));
+        const allEqual = values.every((value) => value === values[0]);
+        const selected = mergeDraft.fields[field] ?? primaryId;
+
+        return `
+            <div class="rounded-lg border ${allEqual ? 'border-[#eef2f8]' : 'border-amber-200 bg-amber-50/40'} p-3">
+                <p class="text-xs font-bold uppercase text-[#7082a4]">${escapeHtml(viewLabelFor(field))}${allEqual ? '' : ' · difiere'}</p>
+                <div class="mt-1 grid gap-1.5">
+                    ${tenders.map((tender) => {
+                        const display = formatViewValue(field, tender[field]);
+                        return `
+                            <label class="flex items-start gap-2 text-sm">
+                                <input type="radio" name="merge-field-${field}" ${tender.id === selected ? 'checked' : ''} data-action="merge-pick-field" data-field="${field}" data-id="${tender.id}">
+                                <span class="${tender.id === primaryId ? 'font-bold text-[#21345d]' : 'font-semibold text-[#53658b]'}">${display ? escapeHtml(display) : '<span class="italic text-[#9aa7c2]">(vacio)</span>'}${tender.id === primaryId ? ' <span class="text-[10px] uppercase text-blue-600">principal</span>' : ''}</span>
+                            </label>
+                        `;
+                    }).join('')}
+                </div>
+            </div>
+        `;
+    }).join('');
+
+    const executionChooser = executionsWith.length > 1 ? `
+        <div class="rounded-lg border border-amber-200 bg-amber-50/40 p-4">
+            <p class="text-xs font-bold uppercase text-[#7082a4]">Datos de ejecucion / pagos · varias licitaciones tienen ejecucion</p>
+            <p class="mt-1 text-sm font-semibold text-[#53658b]">Solo se conserva una. Elige cual:</p>
+            <div class="mt-2 grid gap-2">
+                ${executionsWith.map((tender) => `
+                    <label class="flex items-center gap-2 text-sm font-semibold text-[#21345d]">
+                        <input type="radio" name="merge-execution" ${tender.id === mergeDraft.executionSourceId ? 'checked' : ''} data-action="merge-pick-execution" data-id="${tender.id}">
+                        <span>${escapeHtml(tenderShortLabel(tender))}${tender.id === primaryId ? ' (principal)' : ''}</span>
+                    </label>
+                `).join('')}
+            </div>
+        </div>
+    ` : '';
+
+    modalBody.innerHTML = `
+        <div class="grid gap-4">
+            ${primarySelector}
+            <div class="rounded-lg border border-[#e7edf6] p-4">
+                <p class="text-xs font-bold uppercase text-[#7082a4]">2. Elige que valor conservar en cada campo</p>
+                <p class="mt-1 mb-3 text-sm font-semibold text-[#7082a4]">Los campos resaltados difieren entre las licitaciones.</p>
+                <div class="grid gap-2 sm:grid-cols-2">${fieldRows}</div>
+            </div>
+            ${executionChooser}
+            <div class="rounded-lg bg-blue-50 p-4 text-sm font-semibold text-blue-800">
+                La principal recibira <b>${incomingMilestones}</b> hito(s) y <b>${incomingComments}</b> comentario(s) de las duplicadas.
+                Se eliminaran <b>${duplicates.length}</b> licitacion(es) tras la fusion. Esta accion no se puede deshacer.
+            </div>
+            <div class="flex justify-between gap-3 pt-1">
+                <button class="btn-secondary" type="button" data-action="merge-back">Atras</button>
+                <div class="flex gap-3">
+                    <button class="btn-secondary" type="button" data-close-modal>Cancelar</button>
+                    <button class="btn-primary" type="button" data-action="merge-confirm">Confirmar fusion</button>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+async function confirmMerge() {
+    if (!mergeDraft) {
+        return;
+    }
+
+    const { tenders, primaryId, fields, executionSourceId } = mergeDraft;
+    const duplicateIds = tenders.filter((tender) => tender.id !== primaryId).map((tender) => tender.id);
+
+    if (!confirm(`Se fusionaran ${tenders.length} licitaciones en una sola y se eliminaran ${duplicateIds.length}. Esta accion no se puede deshacer. Continuar?`)) {
+        return;
+    }
+
+    try {
+        await api.mutate('POST', '/api/tenders/merge', { primaryId, duplicateIds, fields, executionSourceId });
+    } catch (error) {
+        handleMutationError(error);
+        return;
+    }
+
+    // El grupo fusionado desaparece; recargamos los datos reales del servidor.
+    duplicateGroups = duplicateGroups.filter((group) => group.key !== mergeDraft.key);
+    mergeDraft = null;
+
+    if (duplicateGroups.length) {
+        renderDuplicatesModalBody();
+    } else {
+        closeModal();
+    }
+
+    setSection('licitaciones');
+}
+
+// ----- Comentarios de la licitacion -----
+
+async function loadTenderComments(tenderId) {
+    try {
+        const result = await api.get('/api/comments', { tender_id: tenderId });
+        viewComments = result.data ?? [];
+    } catch {
+        viewComments = [];
+    }
+    renderTenderCommentsInto(tenderId);
+}
+
+function renderTenderCommentsInto(tenderId) {
+    const container = modalBody.querySelector('[data-comments]');
+    if (!container) {
+        return;
+    }
+    container.innerHTML = renderTenderCommentsSection(tenderId);
+}
+
+function renderTenderCommentsSection(tenderId) {
+    const user = currentUser();
+    const list = viewComments.length
+        ? viewComments.map((comment) => `
+            <div class="rounded-lg border border-[#eef2f8] p-3">
+                <div class="flex items-center justify-between gap-2">
+                    <p class="text-xs font-bold text-[#21345d]">${escapeHtml(comment.author || 'Anonimo')}</p>
+                    <div class="flex items-center gap-2">
+                        <span class="text-xs font-semibold text-[#9aa7c2]">${escapeHtml(formatDate(String(comment.updatedAt ?? '').slice(0, 10)))}</span>
+                        ${(isAdmin() || comment.author === user?.name) ? `<button class="link-danger text-xs" type="button" data-action="delete-comment" data-id="${comment.id}" data-entity="${tenderId}">Borrar</button>` : ''}
+                    </div>
+                </div>
+                <p class="mt-1 whitespace-pre-wrap text-sm font-semibold text-[#53658b]">${escapeHtml(comment.body ?? '')}</p>
+            </div>
+        `).join('')
+        : '<p class="text-sm font-semibold text-[#9aa7c2]">Sin comentarios todavia.</p>';
+
+    return `
+        <h3 class="text-sm font-bold text-[#21345d]">Comentarios</h3>
+        <div class="mt-3 grid gap-2">${list}</div>
+        <form class="mt-3 grid gap-2" data-comment-form data-id="${tenderId}">
+            <textarea class="field-control" name="body" rows="2" placeholder="Anade un comentario..." required></textarea>
+            <div class="flex justify-end"><button class="btn-primary" type="button" data-action="add-comment">Comentar</button></div>
+        </form>
+    `;
+}
+
+async function submitComment(form) {
+    if (!form) {
+        return;
+    }
+    const tenderId = form.dataset.id;
+    const body = form.querySelector('[name="body"]')?.value.trim();
+
+    if (!body) {
+        return;
+    }
+
+    try {
+        await api.mutate('POST', '/api/comments', { tenderId, author: currentUser()?.name ?? '', body });
+    } catch (error) {
+        handleMutationError(error);
+        return;
+    }
+
+    await loadTenderComments(tenderId);
+}
+
+async function deleteComment(commentId, tenderId) {
+    if (!confirm('Borrar este comentario?')) {
+        return;
+    }
+    try {
+        await api.mutate('DELETE', `/api/comments/${commentId}`);
+    } catch (error) {
+        handleMutationError(error);
+        return;
+    }
+    await loadTenderComments(tenderId);
 }
 
 async function saveForm(form) {
@@ -4328,7 +4826,25 @@ document.addEventListener('click', (event) => {
         openForm(entity, null, { date });
     } else if (action === 'ejecucion-list') {
         ejecucionView = 'list';
+        ejecucionListQuery = '';
+        ejecucionShowHidden = false;
         render();
+    } else if (action === 'ejecucion-show-hidden-toggle') {
+        ejecucionShowHidden = !ejecucionShowHidden;
+        render();
+    } else if (action === 'ejecucion-toggle-group') {
+        const key = trigger.dataset.key;
+        ejecucionCollapsed[key] = !ejecucionCollapsed[key];
+        const group = trigger.closest('[data-ejecucion-group]');
+        group?.querySelector('[data-ejecucion-cards]')?.classList.toggle('hidden', ejecucionCollapsed[key]);
+        const chevron = trigger.querySelector('[data-chevron]');
+        if (chevron) {
+            chevron.textContent = ejecucionCollapsed[key] ? '▸' : '▾';
+        }
+    } else if (action === 'ejecucion-toggle-visible') {
+        patchExecution(id, { visible: trigger.dataset.value === '1' });
+    } else if (action === 'ejecucion-toggle-hidden') {
+        patchExecution(id, { hidden: trigger.dataset.value === '1' });
     } else if (action === 'ejecucion-open') {
         const record = (view.executions ?? []).find((item) => item.tenderId === id);
         ejecucionTenderId = id;
@@ -4370,7 +4886,7 @@ document.addEventListener('click', (event) => {
                 const freq = Math.round(ejecucionNumber(plan.frequencyMonths)) || 1;
                 const last = plan.cuotas[plan.cuotas.length - 1];
                 const date = last && last.date ? ejecucionAddMonths(last.date, freq) : (plan.startDate || '');
-                plan.cuotas.push({ date, amount: '' });
+                plan.cuotas.push({ name: '', date, amount: '' });
                 render();
             }
         }
@@ -4454,6 +4970,27 @@ document.addEventListener('click', (event) => {
     } else if (action === 'import-clear') {
         clearImportPreview();
         render();
+    } else if (action === 'check-duplicates') {
+        openDuplicatesModal();
+    } else if (action === 'dismiss-duplicate-group') {
+        dismissDuplicateGroup(trigger.dataset.key);
+    } else if (action === 'open-merge') {
+        openMergeModal(trigger.dataset.key);
+    } else if (action === 'merge-back') {
+        renderDuplicatesModalBody();
+    } else if (action === 'merge-set-primary') {
+        setMergePrimary(id);
+    } else if (action === 'merge-pick-field') {
+        setMergeField(trigger.dataset.field, id);
+    } else if (action === 'merge-pick-execution') {
+        mergeDraft.executionSourceId = id;
+        renderMergeModalBody();
+    } else if (action === 'merge-confirm') {
+        confirmMerge();
+    } else if (action === 'add-comment') {
+        submitComment(trigger.closest('[data-comment-form]'));
+    } else if (action === 'delete-comment') {
+        deleteComment(id, entity);
     }
 });
 
@@ -4615,6 +5152,12 @@ document.addEventListener('input', (event) => {
             tenderFilterTimer = null;
             render();
         }, 300);
+        return;
+    }
+
+    if (event.target.matches('[data-ejecucion-search]')) {
+        ejecucionListQuery = event.target.value;
+        filterEjecucionList();
         return;
     }
 
