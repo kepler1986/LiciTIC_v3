@@ -6,8 +6,13 @@ use App\Models\Member;
 use App\Models\Milestone;
 use App\Models\Setting;
 use App\Models\Tender;
+use App\Models\TenderComment;
+use App\Models\TenderExecution;
 use App\Services\SettingsReader;
+use App\Services\TenderPresentationSync;
+use App\Support\DemoData;
 use App\Support\EntityFields;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
@@ -42,8 +47,10 @@ class BackupController extends Controller
         $counts = ['tenders' => 0, 'events' => 0, 'team' => 0];
 
         DB::transaction(function () use ($data, $now, &$counts) {
-            // Borrado completo (milestones antes que tenders por la relacion).
+            // Borrado completo (datos asociados antes que licitaciones por la relacion).
             Milestone::query()->delete();
+            TenderComment::query()->delete();
+            TenderExecution::query()->delete();
             Tender::query()->delete();
             Member::query()->delete();
             Setting::query()->delete();
@@ -59,6 +66,40 @@ class BackupController extends Controller
                 Setting::create(['key' => 'stats', 'value' => json_encode($data['stats'])]);
             }
         });
+
+        return response()->json($counts);
+    }
+
+    /**
+     * POST /api/admin/reset — borra las licitaciones y sus datos asociados.
+     * mode='empty': deja la base vacia de licitaciones (conserva equipo y configuracion).
+     * mode='demo':  ademas repuebla las licitaciones e hitos de ejemplo (DemoData).
+     */
+    public function reset(Request $request, TenderPresentationSync $sync): JsonResponse
+    {
+        $mode = $request->input('mode') === 'demo' ? 'demo' : 'empty';
+        $now = Carbon::now();
+        $counts = ['mode' => $mode, 'tenders' => 0, 'events' => 0];
+
+        DB::transaction(function () use ($mode, $now, $sync, &$counts) {
+            // Borrado en orden por las relaciones (hijos antes que licitaciones).
+            Milestone::query()->delete();
+            TenderComment::query()->delete();
+            TenderExecution::query()->delete();
+            Tender::query()->delete();
+
+            if ($mode === 'demo') {
+                $counts['tenders'] = $this->restore('tenders', DemoData::tenders(), EntityFields::TENDER, $now);
+                $counts['events'] = $this->restore('milestones', DemoData::events(), EntityFields::MILESTONE, $now);
+
+                // Regenera los hitos de presentacion auto-generados de las licitaciones demo.
+                Tender::all()->each(fn ($tender) => $sync->sync($tender));
+            }
+        });
+
+        if ($mode === 'demo') {
+            $counts['events'] = Milestone::query()->count();
+        }
 
         return response()->json($counts);
     }

@@ -5,26 +5,50 @@ namespace App\Http\Controllers;
 use App\Models\Tender;
 use App\Services\TenderPresentationSync;
 use App\Support\EntityFields;
+use Carbon\CarbonImmutable;
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
+use PhpOffice\PhpSpreadsheet\Cell\DataType;
+use PhpOffice\PhpSpreadsheet\Shared\Date as ExcelDate;
+use PhpOffice\PhpSpreadsheet\Spreadsheet;
+use PhpOffice\PhpSpreadsheet\Style\Alignment;
+use PhpOffice\PhpSpreadsheet\Style\Border;
+use PhpOffice\PhpSpreadsheet\Style\Fill;
+use PhpOffice\PhpSpreadsheet\Worksheet\Worksheet;
+use PhpOffice\PhpSpreadsheet\Writer\Xlsx;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class TenderController extends Controller
 {
     /** Columnas permitidas para ordenar (camel -> snake), evita inyeccion via ?sort=. */
     private const SORTABLE = EntityFields::TENDER;
 
-    public function __construct(private TenderPresentationSync $presentationSync)
-    {
-    }
+    /** @var array<string, string> */
+    private const EXPORT_COLUMNS = [
+        'code' => 'Expediente',
+        'title' => 'Objeto',
+        'lot' => 'Lote',
+        'client' => 'Organismo',
+        'deadline' => 'Fecha fin ofertas',
+        'status' => 'Estado',
+        'budget' => 'PBL',
+        'economicOffer' => 'Oferta economica',
+        'economicOfferWaived' => 'Oferta anulada',
+        'owner' => 'Responsable',
+        'coAuthored' => 'Coautoria',
+        'coAuthor' => 'Coautor',
+        'adjudicationDate' => 'Fecha adjudicacion',
+        'presentedAt' => 'Fecha presentacion',
+        'description' => 'Descripcion',
+    ];
 
-    public function index(Request $request)
-    {
-        $query = Tender::query();
+    public function __construct(private TenderPresentationSync $presentationSync) {}
 
-        $this->applyScope($query, $request);
-        $this->applySearch($query, $request);
-        $this->applyFilters($query, $request);
-        $this->applySort($query, $request);
+    public function index(Request $request): JsonResponse
+    {
+        $query = $this->filteredQuery($request);
 
         $perPage = (int) $request->integer('per_page', 50);
         $perPage = max(1, min($perPage, 200));
@@ -39,6 +63,21 @@ class TenderController extends Controller
                 'currentPage' => $page->currentPage(),
                 'lastPage' => $page->lastPage(),
             ],
+        ]);
+    }
+
+    public function export(Request $request): StreamedResponse
+    {
+        $query = $this->filteredQuery($request, includeFilters: ! $request->boolean('all'));
+        $filename = 'licitic-tenders-'.CarbonImmutable::now()->format('Y-m-d').'.xlsx';
+
+        return response()->streamDownload(function () use ($query): void {
+            $spreadsheet = $this->exportSpreadsheet($query);
+            $writer = new Xlsx($spreadsheet);
+            $writer->save('php://output');
+            $spreadsheet->disconnectWorksheets();
+        }, $filename, [
+            'Content-Type' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         ]);
     }
 
@@ -89,8 +128,25 @@ class TenderController extends Controller
         return response()->noContent();
     }
 
+    /** Query base compartida por listado y exportacion. */
+    private function filteredQuery(Request $request, bool $includeFilters = true): Builder
+    {
+        $query = Tender::query();
+
+        $this->applyScope($query, $request);
+
+        if ($includeFilters) {
+            $this->applySearch($query, $request);
+            $this->applyFilters($query, $request);
+        }
+
+        $this->applySort($query, $request);
+
+        return $query;
+    }
+
     /** Scoping por usuario: los no-admin solo ven sus licitaciones (owner o coautor). */
-    private function applyScope($query, Request $request): void
+    private function applyScope(Builder $query, Request $request): void
     {
         $scope = $request->input('scope');
 
@@ -104,7 +160,7 @@ class TenderController extends Controller
         }
     }
 
-    private function applySearch($query, Request $request): void
+    private function applySearch(Builder $query, Request $request): void
     {
         $search = trim((string) $request->input('search', ''));
 
@@ -121,7 +177,7 @@ class TenderController extends Controller
         }
     }
 
-    private function applyFilters($query, Request $request): void
+    private function applyFilters(Builder $query, Request $request): void
     {
         if ($status = $request->input('status')) {
             $query->where('status', $status);
@@ -152,12 +208,109 @@ class TenderController extends Controller
         }
     }
 
-    private function applySort($query, Request $request): void
+    private function applySort(Builder $query, Request $request): void
     {
         $sortCamel = $request->input('sort', 'deadline');
         $column = self::SORTABLE[$sortCamel] ?? 'deadline';
         $direction = strtolower((string) $request->input('direction', 'asc')) === 'desc' ? 'desc' : 'asc';
 
+        if (in_array($column, ['deadline', 'adjudication_date', 'presented_at'], true)) {
+            $query->orderByRaw("({$column} is null or {$column} = '') asc");
+        }
+
         $query->orderBy($column, $direction)->orderBy('id', 'asc');
+    }
+
+    private function exportSpreadsheet(Builder $query): Spreadsheet
+    {
+        $spreadsheet = new Spreadsheet;
+        $sheet = $spreadsheet->getActiveSheet();
+        $sheet->setTitle('Licitaciones');
+
+        $headers = array_values(self::EXPORT_COLUMNS);
+        $sheet->fromArray($headers, null, 'A1');
+
+        $row = 2;
+        $query->cursor()->each(function (Tender $tender) use ($sheet, &$row): void {
+            $data = EntityFields::toCamel($tender, EntityFields::TENDER);
+            $column = 1;
+
+            foreach (array_keys(self::EXPORT_COLUMNS) as $field) {
+                $this->writeExportCell($sheet, $row, $column, $field, $data[$field] ?? null);
+                $column++;
+            }
+
+            $row++;
+        });
+
+        $lastColumn = $sheet->getHighestColumn();
+        $lastRow = max(1, $row - 1);
+
+        $sheet->freezePane('A2');
+        $sheet->setAutoFilter("A1:{$lastColumn}{$lastRow}");
+        $sheet->getStyle("A1:{$lastColumn}1")->applyFromArray([
+            'font' => ['bold' => true, 'color' => ['rgb' => 'FFFFFF']],
+            'fill' => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['rgb' => '1D4ED8']],
+            'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER],
+        ]);
+        $sheet->getStyle("A1:{$lastColumn}{$lastRow}")->getBorders()->getAllBorders()->setBorderStyle(Border::BORDER_THIN);
+        if ($lastRow >= 2) {
+            $sheet->getStyle("G2:H{$lastRow}")->getNumberFormat()->setFormatCode('#,##0.00');
+            $sheet->getStyle("E2:E{$lastRow}")->getNumberFormat()->setFormatCode('yyyy-mm-dd hh:mm');
+            $sheet->getStyle("M2:N{$lastRow}")->getNumberFormat()->setFormatCode('yyyy-mm-dd');
+        }
+
+        foreach (range('A', $lastColumn) as $column) {
+            $sheet->getColumnDimension($column)->setAutoSize(true);
+        }
+
+        return $spreadsheet;
+    }
+
+    private function writeExportCell(Worksheet $sheet, int $row, int $column, string $field, mixed $value): void
+    {
+        if (in_array($field, ['budget', 'economicOffer'], true)) {
+            $sheet->setCellValue([$column, $row], $this->exportNumber($value));
+
+            return;
+        }
+
+        if (in_array($field, ['deadline', 'adjudicationDate', 'presentedAt'], true)) {
+            $sheet->setCellValue([$column, $row], $this->exportDate($value, $field === 'deadline'));
+
+            return;
+        }
+
+        if (in_array($field, ['economicOfferWaived', 'coAuthored'], true)) {
+            $sheet->setCellValue([$column, $row], $value ? 'Si' : 'No');
+
+            return;
+        }
+
+        $sheet->setCellValueExplicit([$column, $row], (string) $value, DataType::TYPE_STRING);
+    }
+
+    private function exportNumber(mixed $value): ?float
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+
+        return (float) str_replace(',', '.', (string) $value);
+    }
+
+    private function exportDate(mixed $value, bool $withTime = false): float|string|null
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+
+        try {
+            $date = CarbonImmutable::parse((string) $value);
+
+            return ExcelDate::PHPToExcel($withTime ? $date : $date->startOfDay());
+        } catch (\Throwable) {
+            return (string) $value;
+        }
     }
 }

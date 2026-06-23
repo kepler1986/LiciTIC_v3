@@ -4,8 +4,8 @@ use App\Http\Controllers\BackupController;
 use App\Http\Controllers\CommentController;
 use App\Http\Controllers\ExecutionController;
 use App\Http\Controllers\ImportController;
-use App\Http\Controllers\MergeController;
 use App\Http\Controllers\MemberController;
+use App\Http\Controllers\MergeController;
 use App\Http\Controllers\MetricsController;
 use App\Http\Controllers\MilestoneController;
 use App\Http\Controllers\SearchController;
@@ -16,6 +16,7 @@ use Illuminate\Support\Facades\Route;
 // Importacion (antes del resource para evitar colisiones de ruta).
 Route::post('tenders/import/preview', [ImportController::class, 'preview']);
 Route::post('tenders/import/commit', [ImportController::class, 'commit']);
+Route::get('tenders/export', [TenderController::class, 'export']);
 
 // Verificador y fusionador de duplicados (antes del resource para evitar colisiones).
 Route::get('tenders/duplicates', [MergeController::class, 'duplicates']);
@@ -48,3 +49,4 @@ Route::get('search', [SearchController::class, 'index']);
 
 Route::get('admin/export', [BackupController::class, 'export']);
 Route::post('admin/import', [BackupController::class, 'import']);
+Route::post('admin/reset', [BackupController::class, 'reset']);

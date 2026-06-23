@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\Member;
+use App\Models\Milestone;
 use App\Models\Tender;
 use App\Support\DemoData;
 use App\Support\EntityFields;
@@ -101,7 +102,7 @@ class MetricsService
                 'due' => $due,
                 'dueThisWeek' => $dueThisWeek,
                 'successRate' => $successRate,
-                'successRateMeta' => ($won + $lost) ? "$won ganadas de ".($won + $lost)." cerradas" : 'Sin cerradas',
+                'successRateMeta' => ($won + $lost) ? "$won ganadas de ".($won + $lost).' cerradas' : 'Sin cerradas',
                 'workload' => $avgWorkload,
             ],
             'missingOffers' => EntityFields::collectionToCamel($missingOffers, EntityFields::TENDER),
@@ -136,6 +137,7 @@ class MetricsService
         return [
             'total' => $total,
             'byStatus' => $byStatus,
+            'volumeByMonth' => $this->volumeByMonth($base()),
             'active' => (int) ($byStatus['En preparacion'] ?? 0),
             'review' => (int) ($byStatus['En evaluacion'] ?? 0),
             'pending' => (int) ($byStatus['En analisis'] ?? 0),
@@ -144,6 +146,32 @@ class MetricsService
             'successRate' => ($won + $lost) ? (int) round($won / ($won + $lost) * 100) : 0,
             'userStats' => $userCards,
         ];
+    }
+
+    /**
+     * Licitaciones por mes (segun deadline) de los ultimos 5 meses incluido el actual.
+     * Rellena con 0 los meses sin datos para tener siempre 5 barras con etiqueta.
+     */
+    private function volumeByMonth($query): array
+    {
+        $counts = (clone $query)
+            ->selectRaw('substr(deadline,1,7) as ym, count(*) as c')
+            ->whereNotNull('deadline')->where('deadline', '<>', '')
+            ->groupBy('ym')->pluck('c', 'ym');
+
+        $labels = ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic'];
+        $months = [];
+        for ($i = 4; $i >= 0; $i--) {
+            $month = CarbonImmutable::now()->subMonthsNoOverflow($i);
+            $key = $month->format('Y-m');
+            $months[] = [
+                'month' => $key,
+                'label' => $labels[(int) $month->format('n') - 1],
+                'count' => (int) ($counts[$key] ?? 0),
+            ];
+        }
+
+        return $months;
     }
 
     /** Tarjeta de estadisticas por usuario (agregados SQL sobre tenders en que participa). */
@@ -245,7 +273,7 @@ class MetricsService
         $today = CarbonImmutable::now()->startOfDay();
         $in7 = $today->addDays(7);
 
-        $presentationsQuery = \App\Models\Milestone::query()
+        $presentationsQuery = Milestone::query()
             ->where('type', 'Presentacion')
             ->where('date', '>=', $today->format('Y-m-d'))
             ->where('date', '<=', $in7->format('Y-m-d').'T23:59');

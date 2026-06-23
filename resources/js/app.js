@@ -358,6 +358,23 @@ function parseDate(value) {
     return new Date(year, month - 1, day, hour || 0, minute || 0);
 }
 
+function dateSortValue(value) {
+    const timestamp = parseDate(value)?.getTime();
+
+    return Number.isFinite(timestamp) ? timestamp : Number.MAX_SAFE_INTEGER;
+}
+
+function compareDateValues(firstValue, secondValue) {
+    const firstTimestamp = dateSortValue(firstValue);
+    const secondTimestamp = dateSortValue(secondValue);
+
+    if (firstTimestamp !== secondTimestamp) {
+        return firstTimestamp - secondTimestamp;
+    }
+
+    return String(firstValue ?? '').localeCompare(String(secondValue ?? ''));
+}
+
 function addDays(date, days) {
     const next = new Date(date);
     next.setDate(next.getDate() + days);
@@ -577,7 +594,7 @@ function averageEconomicOffer(tenders) {
 function missingEconomicOfferTenders() {
     return visibleItems('tenders')
         .filter(needsEconomicOffer)
-        .sort((first, second) => first.deadline.localeCompare(second.deadline));
+        .sort((first, second) => compareDateValues(first.deadline, second.deadline));
 }
 
 function missingEconomicOfferCount(tenders) {
@@ -1007,17 +1024,7 @@ async function loadSectionData(section) {
     }
 
     if (section === 'licitaciones') {
-        const params = scopeParams({
-            page: tenderPage,
-            per_page: tenderPerPage,
-            sort: tenderSort.column,
-            direction: tenderSort.direction,
-        });
-        Object.entries(tenderColumnFilters).forEach(([column, value]) => {
-            if (value) {
-                params[`filters[${column}]`] = value;
-            }
-        });
+        const params = tenderListParams({ page: tenderPage, perPage: tenderPerPage, includeFilters: true });
         const result = await api.get('/api/tenders', params);
         state.tenders = result.data ?? [];
         tenderPageMeta = result.meta ?? { total: 0, lastPage: 1, currentPage: 1 };
@@ -1145,6 +1152,17 @@ function sectionActions() {
 
     const [entity, label] = actionBySection[currentSection] ?? actionBySection.inicio;
 
+    if (currentSection === 'licitaciones') {
+        const duplicatesButton = isAdmin()
+            ? '<button class="btn-secondary" type="button" data-action="check-duplicates">Verificar duplicados</button>'
+            : '';
+        const createButton = canCreate(entity)
+            ? `<button class="btn-primary" type="button" data-action="new" data-entity="${entity}">${label}</button>`
+            : '';
+
+        return `${duplicatesButton}<button class="btn-secondary" type="button" data-action="export-tenders">Exportar Excel</button><button class="btn-secondary" type="button" data-action="export-all-tenders">Exportar todo</button>${createButton}`;
+    }
+
     // En licitaciones, el admin puede verificar y fusionar posibles duplicados.
     const duplicatesButton = currentSection === 'licitaciones' && isAdmin()
         ? '<button class="btn-secondary" type="button" data-action="check-duplicates">Verificar duplicados</button>'
@@ -1155,6 +1173,35 @@ function sectionActions() {
     }
 
     return `${duplicatesButton}<button class="btn-primary" type="button" data-action="new" data-entity="${entity}">${label}</button>`;
+}
+
+function tenderListParams({ page = null, perPage = null, includeFilters = true, all = false } = {}) {
+    const params = scopeParams({
+        sort: tenderSort.column,
+        direction: tenderSort.direction,
+    });
+
+    if (page !== null) {
+        params.page = page;
+    }
+
+    if (perPage !== null) {
+        params.per_page = perPage;
+    }
+
+    if (all) {
+        params.all = 1;
+    }
+
+    if (includeFilters) {
+        Object.entries(tenderColumnFilters).forEach(([column, value]) => {
+            if (value) {
+                params[`filters[${column}]`] = value;
+            }
+        });
+    }
+
+    return params;
 }
 
 function renderDashboard() {
@@ -2117,6 +2164,15 @@ function tenderTableItems(items) {
     const direction = tenderSort.direction === 'desc' ? -1 : 1;
 
     return filteredItems.sort((first, second) => {
+        if (tenderSort.column === 'deadline') {
+            const firstMissingDeadline = !parseDate(first.deadline);
+            const secondMissingDeadline = !parseDate(second.deadline);
+
+            if (firstMissingDeadline !== secondMissingDeadline) {
+                return firstMissingDeadline ? 1 : -1;
+            }
+        }
+
         const firstValue = tenderSortValue(first, tenderSort.column);
         const secondValue = tenderSortValue(second, tenderSort.column);
 
@@ -2364,7 +2420,7 @@ function upcomingPresentations() {
 
             return event.type === 'Presentacion' && eventDate >= start && eventDate <= end;
         })
-        .sort((a, b) => a.date.localeCompare(b.date));
+        .sort((a, b) => compareDateValues(a.date, b.date));
 }
 
 function notificationCount() {
@@ -2424,7 +2480,7 @@ function eventList() {
             return firstDate - secondDate;
         }
 
-        return first.title.localeCompare(second.title);
+        return String(first.title ?? '').localeCompare(String(second.title ?? ''));
     });
 
     return `
@@ -2528,7 +2584,7 @@ function renderGantt() {
         .filter((tender) => tenderInvolvesKnownUser(tender, userNamesSet))
         .filter((tender) => tender.status === 'En preparacion')
         .filter((tender) => parseDate(tender.deadline) >= start)
-        .sort((first, second) => first.deadline.localeCompare(second.deadline));
+        .sort((first, second) => compareDateValues(first.deadline, second.deadline));
 
     return `
         <section class="panel">
@@ -3375,6 +3431,14 @@ function renderAdmin() {
                     <button class="btn-danger" type="button" data-action="import-backup">Importar y reemplazar</button>
                 </div>
             </div>
+            <div class="mt-6 rounded-lg border border-rose-200 bg-rose-50 p-5">
+                <h3 class="text-sm font-bold text-rose-900">Reset de licitaciones</h3>
+                <p class="mt-1 text-sm font-semibold text-rose-800">Borra licitaciones, hitos, comentarios y ejecuciones. Conserva equipo y configuracion.</p>
+                <div class="mt-4 flex flex-wrap items-center gap-3">
+                    <button class="btn-danger" type="button" data-action="reset-tenders" data-mode="empty">Vaciar licitaciones</button>
+                    <button class="btn-secondary" type="button" data-action="reset-tenders" data-mode="demo">Restaurar demo</button>
+                </div>
+            </div>
         </section>
     `;
 }
@@ -3396,7 +3460,7 @@ function renderStatsBody() {
         <div class="mt-6 grid gap-5 lg:grid-cols-3">
             <div>
                 <h3 class="text-sm font-bold">Volumen de licitaciones</h3>
-                <div class="mt-8 flex h-36 items-end gap-5">${[45, 42, 62, 70, 95].map((height) => `<span class="w-6 rounded-t-md bg-blue-600" style="height:${height}%"></span>`).join('')}</div>
+                ${renderVolumeChart(overview.volumeByMonth ?? [])}
             </div>
             <div>
                 <h3 class="text-sm font-bold">Ganadas vs. perdidas</h3>
@@ -3417,6 +3481,30 @@ function renderStatsBody() {
         </div>
         ${renderUserStatsBody()}
     `;
+}
+
+// Barras de "Volumen de licitaciones": conteo real por mes (deadline) del overview.
+function renderVolumeChart(months) {
+    if (!months.length) {
+        return '<p class="mt-8 text-sm font-semibold text-[#7082a4]">Sin datos de volumen.</p>';
+    }
+
+    const max = Math.max(...months.map((month) => month.count), 0);
+
+    const bars = months.map((month) => {
+        const height = max ? Math.round((month.count / max) * 100) : 0;
+
+        return `
+            <div class="flex flex-1 flex-col items-center gap-1">
+                <span class="text-xs font-bold text-[#21345d]">${month.count}</span>
+                <span class="flex w-full items-end" style="height:7rem">
+                    <span class="w-full rounded-t-md bg-blue-600" style="height:${Math.max(height, month.count ? 6 : 0)}%"></span>
+                </span>
+                <span class="text-xs font-semibold text-[#7082a4]">${escapeHtml(month.label)}</span>
+            </div>`;
+    }).join('');
+
+    return `<div class="mt-6 flex items-end gap-3">${bars}</div>`;
 }
 
 function statRow(label, value, total, color, customColor = '') {
@@ -3509,7 +3597,7 @@ function renderDeadlineList() {
             status: 'Preparacion-Otros',
         }));
     const items = [...tenderItems, ...preparationOtherItems]
-        .sort((a, b) => a.date.localeCompare(b.date))
+        .sort((a, b) => compareDateValues(a.date, b.date))
         .slice(0, 5);
 
     return `
@@ -4587,6 +4675,19 @@ async function exportBackup() {
     }
 }
 
+function exportTenders(all = false) {
+    const params = tenderListParams({ includeFilters: !all, all });
+    const url = new URL('/api/tenders/export', window.location.origin);
+
+    Object.entries(params).forEach(([key, value]) => {
+        if (value !== undefined && value !== null && value !== '') {
+            url.searchParams.set(key, value);
+        }
+    });
+
+    window.location.href = url.toString();
+}
+
 // Sube un JSON exportado y reemplaza por completo los datos y la configuracion.
 async function importBackup() {
     const input = document.querySelector('[data-backup-input]');
@@ -4621,6 +4722,25 @@ async function importBackup() {
             auth = null;
         }
 
+        setSection('admin');
+    } catch (error) {
+        handleMutationError(error);
+    }
+}
+
+async function resetTendersData(mode) {
+    const label = mode === 'demo' ? 'restaurar las licitaciones demo' : 'vaciar las licitaciones';
+
+    if (!confirm(`Vas a ${label}. Se borraran licitaciones, hitos, comentarios y ejecuciones actuales, pero se conservaran equipo y configuracion. Continuar?`)) {
+        return;
+    }
+
+    try {
+        const result = await api.mutate('POST', '/api/admin/reset', { mode });
+        await refreshGlobals();
+        alert(mode === 'demo'
+            ? `Demo restaurada: ${result.tenders} licitaciones, ${result.events} hitos.`
+            : 'Licitaciones vaciadas.');
         setSection('admin');
     } catch (error) {
         handleMutationError(error);
@@ -4943,6 +5063,12 @@ document.addEventListener('click', (event) => {
         exportBackup();
     } else if (action === 'import-backup') {
         importBackup();
+    } else if (action === 'reset-tenders') {
+        resetTendersData(trigger.dataset.mode);
+    } else if (action === 'export-tenders') {
+        exportTenders(false);
+    } else if (action === 'export-all-tenders') {
+        exportTenders(true);
     } else if (action === 'password') {
         openPasswordForm(id);
     } else if (action === 'impersonate') {
