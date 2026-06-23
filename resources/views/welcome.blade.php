@@ -45,7 +45,7 @@
             </aside>
 
             <main class="min-w-0 flex-1">
-                <header class="sticky top-0 z-10 border-b border-[#dfe6f2] bg-white/92 px-4 py-4 backdrop-blur md:px-8">
+                <header class="sticky top-0 z-30 border-b border-[#dfe6f2] bg-white/92 px-4 py-4 backdrop-blur md:px-8">
                     <div class="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
                         <div class="flex flex-1 flex-col gap-3 md:flex-row">
                             <select class="h-12 rounded-lg border border-[#d7e0ee] bg-white px-4 text-sm font-bold text-[#21345d] lg:hidden" data-mobile-nav aria-label="Cambiar seccion"></select>

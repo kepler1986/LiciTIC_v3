@@ -1006,7 +1006,7 @@ async function loadSectionData(section) {
         const [dashboard, overview, monthEvents, deadlineTenders] = await Promise.all([
             api.get('/api/metrics/dashboard', scopeParams()),
             api.get('/api/metrics/overview', scopeParams()),
-            api.get('/api/milestones', scopeParams({ month: currentMonthKey() })),
+            api.get('/api/milestones', scopeParams({ month: dateKey(calendarCursor).slice(0, 7) })),
             api.get('/api/tenders', scopeParams({ status: 'En preparacion', per_page: 100, sort: 'deadline', direction: 'asc' })),
         ]);
         view.dashboard = dashboard;
@@ -2325,6 +2325,12 @@ function cellFor(column, value, item = null) {
 
     if (column === 'passwordResetAt') {
         return `<td>${value ? `<span class="status-pill status-amber">Reset ${formatDate(value.slice(0, 10))}</span>` : '<span class="status-pill status-slate">Sin cambios</span>'}</td>`;
+    }
+
+    if (['lot', 'coAuthor'].includes(column)) {
+        const text = value == null ? '' : String(value).trim();
+
+        return `<td>${text ? escapeHtml(text) : '-'}</td>`;
     }
 
     return `<td>${escapeHtml(value)}</td>`;
