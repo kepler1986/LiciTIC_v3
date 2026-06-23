@@ -55,6 +55,12 @@ class EntityFields
         'installments' => 'installments',
         'installmentPlans' => 'installment_plans',
         'collectedMonths' => 'collected_months',
+        'extensions' => 'extensions',
+        'resolvedByClient' => 'resolved_by_client',
+        'resolutionDate' => 'resolution_date',
+        'penaltyAmount' => 'penalty_amount',
+        'hasGuarantee' => 'has_guarantee',
+        'guaranteeAmount' => 'guarantee_amount',
     ];
 
     public const COMMENT = [

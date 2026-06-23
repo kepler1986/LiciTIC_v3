@@ -20,5 +20,8 @@ class TenderExecution extends Model
         'installments' => 'array',
         'installment_plans' => 'array',
         'collected_months' => 'array',
+        'extensions' => 'array',
+        'resolved_by_client' => 'boolean',
+        'has_guarantee' => 'boolean',
     ];
 }

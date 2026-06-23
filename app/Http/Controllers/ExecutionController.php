@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\Tender;
 use App\Models\TenderExecution;
+use App\Services\ExecutionSync;
 use App\Support\EntityFields;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
@@ -22,12 +23,18 @@ class ExecutionController extends Controller
         'installments' => [],
         'installmentPlans' => [],
         'collectedMonths' => [],
+        'extensions' => [],
+        'resolvedByClient' => false,
+        'resolutionDate' => null,
+        'penaltyAmount' => null,
+        'hasGuarantee' => false,
+        'guaranteeAmount' => null,
     ];
 
-    /** Licitaciones ganadas con sus datos de ejecucion fusionados. */
+    /** Licitaciones ganadas (o resueltas por cliente) con sus datos de ejecucion fusionados. */
     public function index()
     {
-        $tenders = Tender::where('status', 'Ganada')->orderBy('code')->get();
+        $tenders = Tender::whereIn('status', ['Ganada', 'Resuelta por cliente'])->orderBy('code')->get();
 
         $executions = TenderExecution::whereIn('tender_id', $tenders->pluck('id'))
             ->get()
@@ -44,8 +51,11 @@ class ExecutionController extends Controller
                 $exec['installments'] = $exec['installments'] ?? [];
                 $exec['installmentPlans'] = $exec['installmentPlans'] ?? [];
                 $exec['collectedMonths'] = $exec['collectedMonths'] ?? [];
+                $exec['extensions'] = $exec['extensions'] ?? [];
                 $exec['visible'] = (bool) ($exec['visible'] ?? false);
                 $exec['hidden'] = (bool) ($exec['hidden'] ?? false);
+                $exec['resolvedByClient'] = (bool) ($exec['resolvedByClient'] ?? false);
+                $exec['hasGuarantee'] = (bool) ($exec['hasGuarantee'] ?? false);
             } else {
                 $exec = self::EXECUTION_DEFAULTS;
             }
@@ -59,7 +69,7 @@ class ExecutionController extends Controller
     }
 
     /** Upsert por tender_id de la configuracion de ejecucion. */
-    public function update(Request $request, string $tender)
+    public function update(Request $request, string $tender, ExecutionSync $sync)
     {
         $attributes = EntityFields::toAttributes($request->all(), EntityFields::EXECUTION);
         unset($attributes['id'], $attributes['tender_id']);
@@ -73,6 +83,9 @@ class ExecutionController extends Controller
 
         $execution->fill($attributes)->save();
 
-        return response()->json(EntityFields::toCamel($execution->fresh(), EntityFields::EXECUTION));
+        // Sincroniza el estado "Resuelta por cliente" y el recordatorio de garantia.
+        $sync->syncFor($execution->refresh());
+
+        return response()->json(EntityFields::toCamel($execution, EntityFields::EXECUTION));
     }
 }

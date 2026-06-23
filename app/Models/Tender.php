@@ -20,7 +20,7 @@ class Tender extends Model
     ];
 
     /** Estados que cuentan como "cerrados" (no activos). */
-    public const CLOSED_STATUSES = ['Ganada', 'Descartada', 'Desistida', 'Perdida'];
+    public const CLOSED_STATUSES = ['Ganada', 'Descartada', 'Desistida', 'Perdida', 'Resuelta por cliente'];
 
     public function milestones(): HasMany
     {
