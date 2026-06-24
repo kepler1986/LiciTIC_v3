@@ -1473,13 +1473,294 @@ function renderEjecucion() {
     return renderEjecucionHome();
 }
 
+// Licitaciones ganadas que estan en el calendario de pagos (activas y no ocultas).
+function ejecucionActiveRecords() {
+    return (view.executions ?? []).filter((record) => record.visible && !record.hidden);
+}
+
+// Resumen economico de los proyectos activos: totales y serie mensual de cobros previstos.
+// Excluye la garantia (no la devuelve paymentsByMonthFor) y respeta los pagos anulados.
+function ejecucionFinanceSummary() {
+    const records = ejecucionActiveRecords();
+    const currentMonth = currentMonthKey();
+    const currentYear = currentMonth.slice(0, 4);
+    const monthMap = {};
+
+    records.forEach((record) => {
+        const byMonth = paymentsByMonthFor(record);
+        const collected = Array.isArray(record.collectedMonths) ? record.collectedMonths : [];
+        Object.entries(byMonth).forEach(([month, cell]) => {
+            if (!monthMap[month]) {
+                monthMap[month] = { expected: 0, collected: 0 };
+            }
+            monthMap[month].expected += cell.total;
+            if (collected.includes(month)) {
+                monthMap[month].collected += cell.total;
+            }
+        });
+    });
+
+    // Eje temporal continuo (rellena los meses sin cobro con 0) desde el primer al ultimo mes
+    // con actividad: asi el historico no se comprime ni descoloca cuando hay huecos.
+    const keys = Object.keys(monthMap).sort();
+    const months = [];
+    if (keys.length) {
+        const base = `${keys[0]}-01`;
+        const endKey = `${keys[keys.length - 1]}-01`;
+        let cursor = base;
+        let guard = 0;
+        while (cursor <= endKey && guard < 1200) {
+            const month = cursor.slice(0, 7);
+            months.push({ month, expected: monthMap[month]?.expected ?? 0, collected: monthMap[month]?.collected ?? 0 });
+            cursor = ejecucionAddMonths(base, months.length);
+            guard += 1;
+        }
+    }
+
+    return {
+        activeCount: records.length,
+        total: months.reduce((sum, x) => sum + x.expected, 0),
+        collected: months.reduce((sum, x) => sum + x.collected, 0),
+        annual: months.filter((x) => x.month.startsWith(`${currentYear}-`)).reduce((sum, x) => sum + x.expected, 0),
+        month: monthMap[currentMonth]?.expected ?? 0,
+        monthCollected: monthMap[currentMonth]?.collected ?? 0,
+        months,
+        currentMonth,
+        currentYear,
+    };
+}
+
+// Importe en euros compacto para los ejes del grafico (12 k€, 1,5 M€, ...).
+function compactEuro(value) {
+    const abs = Math.abs(value);
+    if (abs >= 1000000) {
+        return `${(value / 1000000).toLocaleString('es-ES', { maximumFractionDigits: 1 })} M€`;
+    }
+    if (abs >= 1000) {
+        return `${Math.round(value / 1000).toLocaleString('es-ES')} k€`;
+    }
+
+    return `${Math.round(value).toLocaleString('es-ES')} €`;
+}
+
+// Etiqueta corta de un mes "YYYY-MM" -> "ene 25".
+function ejecucionShortMonth(month) {
+    const shortMonths = ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic'];
+    const [year, mm] = month.split('-');
+
+    return `${shortMonths[Number(mm) - 1] ?? ''} ${year.slice(2)}`;
+}
+
+// Geometria compartida de los graficos financieros (SVG responsive de 1000x280).
+function ejecucionChartGeom(n) {
+    const W = 1000;
+    const H = 280;
+    const padL = 66;
+    const padR = 20;
+    const padT = 22;
+    const padB = 36;
+    const plotW = W - padL - padR;
+    const plotH = H - padT - padB;
+    const X = (i) => padL + (n <= 1 ? plotW / 2 : (plotW * i) / (n - 1));
+
+    return { W, H, padL, padR, padT, padB, plotW, plotH, X };
+}
+
+// Lineas horizontales de referencia con su importe, repartidas sobre el rango [yMin, yMax].
+function ejecucionChartGrid(geom, yMin, yMax) {
+    const range = (yMax - yMin) || 1;
+
+    return [0, 0.25, 0.5, 0.75, 1].map((frac) => {
+        const y = (geom.padT + geom.plotH * (1 - frac)).toFixed(1);
+        return `
+            <line x1="${geom.padL}" y1="${y}" x2="${geom.W - geom.padR}" y2="${y}" stroke="#eef2f8" stroke-width="1"/>
+            <text x="${geom.padL - 8}" y="${y}" text-anchor="end" dominant-baseline="middle" font-size="12" fill="#7082a4" font-weight="600">${compactEuro(yMin + range * frac)}</text>
+        `;
+    }).join('');
+}
+
+// Etiquetas del eje X: hasta ~7 repartidas, asegurando el primer y el ultimo mes.
+function ejecucionChartXLabels(geom, months) {
+    const n = months.length;
+    const step = Math.max(1, Math.ceil(n / 7));
+
+    return months.map((m, i) => {
+        if (i !== 0 && i !== n - 1 && i % step !== 0) {
+            return '';
+        }
+        return `<text x="${geom.X(i).toFixed(1)}" y="${geom.H - 12}" text-anchor="middle" font-size="12" fill="#7082a4" font-weight="600">${ejecucionShortMonth(m.month)}</text>`;
+    }).join('');
+}
+
+// Marcador vertical del mes actual (solo si cae dentro del rango representado).
+function ejecucionChartTodayMarker(geom, months, currentMonth) {
+    const i = months.findIndex((m) => m.month === currentMonth);
+    if (i === -1) {
+        return '';
+    }
+    const x = geom.X(i).toFixed(1);
+
+    return `
+        <line x1="${x}" y1="${geom.padT}" x2="${x}" y2="${geom.padT + geom.plotH}" stroke="#e11d48" stroke-width="1.4" stroke-dasharray="4 4"/>
+        <text x="${x}" y="${geom.padT - 6}" text-anchor="middle" font-size="11" fill="#e11d48" font-weight="700">Hoy</text>
+    `;
+}
+
+// Grafico de barras: cobro previsto mes a mes a lo largo del historico (no acumulado).
+// Cada barra superpone en verde la parte ya cobrada de ese mes.
+function renderEjecucionMonthlyChart(summary) {
+    const { months, currentMonth } = summary;
+    if (!months.length) {
+        return '<p class="text-sm font-semibold text-[#7082a4]">No hay cobros previstos en los proyectos del calendario todavia.</p>';
+    }
+
+    const geom = ejecucionChartGeom(months.length);
+    const n = months.length;
+    const amounts = months.map((m) => m.expected);
+    const yMax = Math.max(0, ...amounts);
+    const yMin = Math.min(0, ...amounts);
+    const range = (yMax - yMin) || 1;
+    const Y = (v) => geom.padT + geom.plotH * (1 - (v - yMin) / range);
+    const baseline = Y(0);
+    const barW = Math.max(2, (geom.plotW / n) * 0.62);
+
+    const bars = months.map((m, i) => {
+        const cx = geom.X(i);
+        const x = (cx - barW / 2).toFixed(1);
+        const tip = `${ejecucionShortMonth(m.month)} · previsto ${formatCurrency(m.expected) === 'Sin importe' ? '0 €' : formatCurrency(m.expected)}${m.collected ? ` · cobrado ${formatCurrency(m.collected)}` : ''}`;
+
+        if (m.expected < 0) {
+            const h = (Y(m.expected) - baseline).toFixed(1);
+            return `<rect x="${x}" y="${baseline.toFixed(1)}" width="${barW.toFixed(1)}" height="${h}" rx="2" fill="#e11d48"><title>${escapeHtml(tip)}</title></rect>`;
+        }
+        if (m.expected === 0) {
+            return '';
+        }
+
+        const topExpected = Y(m.expected);
+        const expectedRect = `<rect x="${x}" y="${topExpected.toFixed(1)}" width="${barW.toFixed(1)}" height="${(baseline - topExpected).toFixed(1)}" rx="2" fill="#cdddfb"><title>${escapeHtml(tip)}</title></rect>`;
+        const collected = Math.max(0, Math.min(m.collected, m.expected));
+        const collectedRect = collected > 0
+            ? `<rect x="${x}" y="${Y(collected).toFixed(1)}" width="${barW.toFixed(1)}" height="${(baseline - Y(collected)).toFixed(1)}" rx="2" fill="#16a34a"><title>${escapeHtml(tip)}</title></rect>`
+            : '';
+
+        return expectedRect + collectedRect;
+    }).join('');
+
+    return `
+        <div class="mt-1 flex flex-wrap items-center gap-4 text-xs font-bold text-[#53658b]">
+            <span class="flex items-center gap-2"><span class="inline-block h-2.5 w-4 rounded" style="background:#cdddfb"></span>Previsto en el mes</span>
+            <span class="flex items-center gap-2"><span class="inline-block h-2.5 w-4 rounded" style="background:#16a34a"></span>Cobrado</span>
+        </div>
+        <svg viewBox="0 0 ${geom.W} ${geom.H}" width="100%" preserveAspectRatio="xMidYMid meet" style="height:auto;display:block" class="mt-3" role="img" aria-label="Cobro previsto mes a mes">
+            ${ejecucionChartGrid(geom, yMin, yMax)}
+            <line x1="${geom.padL}" y1="${baseline.toFixed(1)}" x2="${geom.W - geom.padR}" y2="${baseline.toFixed(1)}" stroke="#d7e0ee" stroke-width="1"/>
+            ${bars}
+            ${ejecucionChartTodayMarker(geom, months, currentMonth)}
+            ${ejecucionChartXLabels(geom, months)}
+        </svg>
+    `;
+}
+
+// Grafico evolutivo (SVG responsive) del cobro acumulado desde el primer al ultimo mes con
+// actividad. Se ajusta al ancho de la pantalla (viewBox + width 100%), sin scroll lateral.
+function renderEjecucionFinanceChart(summary) {
+    const { months, currentMonth } = summary;
+    if (!months.length) {
+        return '<p class="text-sm font-semibold text-[#7082a4]">No hay cobros previstos en los proyectos del calendario todavia.</p>';
+    }
+
+    const geom = ejecucionChartGeom(months.length);
+    const n = months.length;
+
+    let cumE = 0;
+    let cumC = 0;
+    const pts = months.map((x, i) => {
+        cumE += x.expected;
+        cumC += x.collected;
+        return { i, month: x.month, cumE, cumC };
+    });
+
+    const yMax = Math.max(1, ...pts.map((p) => p.cumE), ...pts.map((p) => p.cumC));
+    const Y = (v) => geom.padT + geom.plotH * (1 - v / yMax);
+
+    const lineE = pts.map((p) => `${geom.X(p.i).toFixed(1)},${Y(p.cumE).toFixed(1)}`).join(' ');
+    const areaE = `${geom.X(0).toFixed(1)},${Y(0).toFixed(1)} ${lineE} ${geom.X(n - 1).toFixed(1)},${Y(0).toFixed(1)}`;
+    const lineC = pts.map((p) => `${geom.X(p.i).toFixed(1)},${Y(p.cumC).toFixed(1)}`).join(' ');
+    const areaC = `${geom.X(0).toFixed(1)},${Y(0).toFixed(1)} ${lineC} ${geom.X(n - 1).toFixed(1)},${Y(0).toFixed(1)}`;
+
+    // Puntos sobre la linea acumulada cuando hay pocos meses (mejor legibilidad).
+    const dots = n <= 28
+        ? pts.map((p) => `<circle cx="${geom.X(p.i).toFixed(1)}" cy="${Y(p.cumE).toFixed(1)}" r="2.6" fill="#1d4ed8"/>`).join('')
+        : '';
+
+    return `
+        <div class="mt-1 flex flex-wrap items-center gap-4 text-xs font-bold text-[#53658b]">
+            <span class="flex items-center gap-2"><span class="inline-block h-2.5 w-4 rounded" style="background:#1d4ed8"></span>Cobro acumulado previsto</span>
+            <span class="flex items-center gap-2"><span class="inline-block h-2.5 w-4 rounded" style="background:#16a34a"></span>Cobrado acumulado</span>
+        </div>
+        <svg viewBox="0 0 ${geom.W} ${geom.H}" width="100%" preserveAspectRatio="xMidYMid meet" style="height:auto;display:block" class="mt-3" role="img" aria-label="Evolucion del cobro acumulado previsto">
+            ${ejecucionChartGrid(geom, 0, yMax)}
+            <polygon points="${areaE}" fill="rgba(29,78,216,0.10)"/>
+            <polygon points="${areaC}" fill="rgba(22,163,74,0.18)"/>
+            <polyline points="${lineE}" fill="none" stroke="#1d4ed8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>
+            <polyline points="${lineC}" fill="none" stroke="#16a34a" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>
+            ${dots}
+            ${ejecucionChartTodayMarker(geom, months, currentMonth)}
+            ${ejecucionChartXLabels(geom, months)}
+        </svg>
+    `;
+}
+
 function renderEjecucionHome() {
+    const summary = ejecucionFinanceSummary();
+    const eur = (value) => (value ? formatCurrency(value) : '0,00 €');
+    const monthPct = summary.month ? Math.round((summary.monthCollected / summary.month) * 100) : 0;
+    const monthValue = `${eur(summary.monthCollected)}<span class="text-base font-bold text-[#7082a4]"> / ${eur(summary.month)}</span>`;
+
+    const headerActions = `
+        <div class="flex flex-wrap gap-3">
+            <button class="btn-primary" type="button" data-action="ejecucion-list">
+                <svg class="mr-2 size-4"><use href="#icon-folder"/></svg>Gestionar licitaciones ganadas
+            </button>
+            <button class="btn-secondary" type="button" data-action="ejecucion-gantt">
+                <svg class="mr-2 size-4"><use href="#icon-calendar"/></svg>Calendario de pagos (GANTT)
+            </button>
+        </div>
+    `;
+
     return `
         <section class="panel">
-            <div class="flex min-h-40 flex-col items-start justify-end gap-4">
-                <button class="btn-primary" type="button" data-action="ejecucion-list">Gestionar ejecucion de licitaciones ganadas</button>
-                <button class="btn-secondary" type="button" data-action="ejecucion-gantt">Calendario de pagos (GANTT)</button>
+            <div class="flex flex-wrap items-center justify-between gap-4">
+                <div class="flex items-center gap-4">
+                    <div class="grid size-12 place-items-center rounded-lg metric-icon-blue">
+                        <svg class="size-6"><use href="#icon-rocket"/></svg>
+                    </div>
+                    <div>
+                        <h2 class="text-lg font-bold text-[#081743]">Inicio de Ejecucion</h2>
+                        <p class="text-sm font-semibold text-[#7082a4]">Seguimiento economico de las licitaciones ganadas en el calendario de pagos.</p>
+                    </div>
+                </div>
+                ${headerActions}
             </div>
+        </section>
+        <section class="dashboard-metrics-frame mt-6">
+            <div class="dashboard-metrics-row">
+                ${metricCard('Proyectos activos', summary.activeCount, 'En el calendario de pagos', 'folder', 'blue', 'text-[#7082a4]')}
+                ${metricCard('Esperado cobrar (total)', eur(summary.total), 'Toda la vida de los proyectos', 'chart', 'violet', 'text-[#7082a4]')}
+                ${metricCard('Previsto este año', eur(summary.annual), summary.currentYear, 'calendar', 'teal', 'text-[#7082a4]')}
+                ${metricCard('Cobrado / previsto (mes)', monthValue, `${ejecucionShortMonth(summary.currentMonth)} · ${monthPct}% cobrado`, 'calendar', 'green', monthPct >= 100 ? 'text-emerald-600' : 'text-[#7082a4]')}
+            </div>
+        </section>
+        <section class="panel mt-6">
+            <h3 class="text-sm font-bold uppercase text-[#21345d]">Cobro previsto mes a mes</h3>
+            <p class="mt-1 text-sm font-semibold text-[#7082a4]">Importe de cada mes a lo largo del historico (sin contar la garantia).</p>
+            ${renderEjecucionMonthlyChart(summary)}
+        </section>
+        <section class="panel mt-6">
+            <h3 class="text-sm font-bold uppercase text-[#21345d]">Evolucion del cobro previsto (acumulado)</h3>
+            <p class="mt-1 text-sm font-semibold text-[#7082a4]">Acumulado desde el primer cobro hasta el ultimo mes con actividad (sin contar la garantia).</p>
+            ${renderEjecucionFinanceChart(summary)}
         </section>
     `;
 }
